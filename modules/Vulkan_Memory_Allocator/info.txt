@@ -1,0 +1,6 @@
+got this module from /examples/VR/modules/Vulkan_Memory_Allocator
+
+i modified the generate.jai to fix some build issues. i get the newest vma.
+the linux/libvma.so is from Vortice.Vulkan.
+it is not compiled from the source/ because i couldnt manage to build it.
+for that reason it is not gonna work on windows. you need to update the dll.
