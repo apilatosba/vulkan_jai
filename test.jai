@@ -15,7 +15,7 @@ Maybe :: struct (T: Type) {
    set_build_options_dc(.{ do_output = false });
    InitializeThreads();
    x := 69;
-   F(x);
+   // F(cast(Maybe(int)) x);
 }
 
 F :: (m: Maybe(int)) {

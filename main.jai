@@ -5,7 +5,7 @@
 #import "StableIndexArray";
 #import "Hash_Table";
 #import "Queue";
-#import "Thread";
+Thread :: #import "Thread";
 #import "System";
 #import "ApilaDispatch";
 
@@ -278,6 +278,7 @@ Window :: struct {
    queueSubmitFences:         [] VkFence;       // index using cpuFrameTimeline % count
 
    cpuFrameTimeline:          int; // incremented by one each frame.
+   swapchainImageIndex:       u32; // output of AcquireSwapchainImage
 }
 
 VulkanThings :: struct {
@@ -294,8 +295,8 @@ VulkanThings :: struct {
                                                                   // this field is meant to be global but it is fine to keep it here
                                                                   // since the whole struct has only one global instance.
    graphicsQueue:                               VkQueue;    // TODO add a transfer queue if youd like
-   graphicsQueueTimelineSemaphore:              TimelineSemaphore;
-   graphicsQueueSubmitMutex:                    Mutex;
+   graphicsQueueTimelineSemaphore:              Semaphore;
+   graphicsQueueSubmitMutex:                    Thread.Mutex;
 }
 
 // stores a single VkCommandBuffer and all the command buffers allocated from it
@@ -316,9 +317,31 @@ CommandBuffer :: struct {
                               //       - apila, 26/03/25
 }
 
-TimelineSemaphore :: struct {
+// if semaphore is binary then value field is ignored
+// i have this so i can have a unified struct to use in Submit function
+Semaphore :: struct {
    semaphore:  VkSemaphore;
    value:      u64;
+}
+
+RenderPassAttachmentInfo :: struct {
+   image:            *Image;
+   hasClearValue:    bool;
+   clearValue:       struct {
+                        color:      Vector4;
+                        depth:      float32;
+                        stencil:    u32;
+                     };
+   imageView:        VkImageView; // if set overrides image.imageView
+   resolveImageView: VkImageView; // if null then no resolve
+}
+
+RenderPassDescription :: struct {
+   colorTargets:        [] RenderPassAttachmentInfo;
+   hasDepthTarget:      bool;
+   depthTarget:         RenderPassAttachmentInfo;
+   hasStencilTarget:    bool;
+   stencilTarget:       RenderPassAttachmentInfo;
 }
 
 // globals
@@ -334,27 +357,126 @@ main :: () {
    while (!glfwWindowShouldClose(window.window)) {
       defer window = Get(*windows, windowIndex);
 
-      swapchainImageIndex := AcquireSwapchainImage(window);
+      AcquireSwapchainImage(window);
       glfwPollEvents();
 
       cmd := StartCommandRecording();
 
+      Submit(cmd); // when cmd doesnt render to swapchain.
+      SubmitSwapchain(cmd, window); // when cmd renders to swapchain
+
+      Present(window);
    }
 }
 
-SetRenderTarget :: (cmd: CommandBuffer, colorTargets: [] Image, depthTarget: Image, stencilTarget: Image) {
+GetImageViewFromRenderPassAttachmentInfo :: (info: RenderPassAttachmentInfo) -> VkImageView {
+   return ifx info.imageView != null then info.imageView else info.image.view;
+}
+
+Vector4ToVkClearColorValue :: (v: Vector4) -> VkClearColorValue {
+   result: VkClearColorValue;
+   result.float32_ = .[v.x, v.y, v.z, v.w];
+   return result;
+}
+
+BeginRenderPass :: (cmd: *CommandBuffer, description: RenderPassDescription) {
+   assert(description.colorTargets.count > 0, "description.colorTargets.count: %", description.colorTargets.count);
+   assert(!description.hasStencilTarget, "stencil not implemented");
+
+   colorAttachmentInfos := NewArray(description.colorTargets.count, VkRenderingAttachmentInfo,, temp);
+   for 0..description.colorTargets.count - 1 {
+      colorAttachmentInfos[it] = .{
+         sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+         pNext = null,
+         clearValue = ifx description.colorTargets[it].hasClearValue then .{
+            color = Vector4ToVkClearColorValue(description.colorTargets[it].clearValue.color),
+         } else VkClearValue.{ color = .{ float32_ = .[1, 0, 1, 1] } },
+         loadOp = ifx description.colorTargets[it].hasClearValue then VK_ATTACHMENT_LOAD_OP_CLEAR else VK_ATTACHMENT_LOAD_OP_LOAD,
+         storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+         imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+         imageView = GetImageViewFromRenderPassAttachmentInfo(description.colorTargets[it]),
+         resolveMode = ifx description.colorTargets[it].resolveImageView != null then VK_RESOLVE_MODE_AVERAGE_BIT else VK_RESOLVE_MODE_NONE,
+         resolveImageLayout = ifx description.colorTargets[it].resolveImageView != null then VK_IMAGE_LAYOUT_GENERAL else 0,
+         resolveImageView = description.colorTargets[it].resolveImageView,
+      };
+   }
+
+   depthAttachmentInfo: VkRenderingAttachmentInfo = .{
+      sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+      pNext = null,
+      clearValue = ifx description.depthTarget.hasClearValue then .{
+         depthStencil = .{ description.depthTarget.clearValue.depth, description.depthTarget.clearValue.stencil }
+      } else VkClearValue.{ depthStencil = .{ 1, 0 } } ,
+      loadOp = ifx description.depthTarget.hasClearValue then VK_ATTACHMENT_LOAD_OP_CLEAR else VK_ATTACHMENT_LOAD_OP_LOAD,
+      storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+      imageView = ifx description.hasDepthTarget then GetImageViewFromRenderPassAttachmentInfo(description.depthTarget) else null,
+   };
+
+   // is this is wrong? if the imageView targets a mip level then what?
+   // then i think i need to use the extent of the mip level
+   renderAreaWidth := description.colorTargets[0].image.size[0];
+   renderAreaHeight := description.colorTargets[0].image.size[1];
+
+   renderingInfo: VkRenderingInfo = .{
+      sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+      pNext = null,
+      colorAttachmentCount = xx colorAttachmentInfos.count,
+      pColorAttachments = colorAttachmentInfos.data,
+      pDepthAttachment = *depthAttachmentInfo,
+      renderArea = .{
+         offset = .{ 0, 0 },
+         extent = .{ renderAreaWidth, renderAreaHeight },
+      },
+      layerCount = 1,
+      pStencilAttachment = null,
+   };
+
+   vkCmdBeginRendering(cmd.cmd, *renderingInfo);
+
+   scissor: VkRect2D = .{ .{ 0, 0 }, .{ renderAreaWidth, renderAreaHeight } };
+   vkCmdSetScissorWithCountEXT(cmd.cmd, 1, *scissor);
+
+   viewport: VkViewport = .{ 0, xx renderAreaHeight, xx renderAreaWidth, -cast(float) renderAreaHeight, 0, 1 };
+   vkCmdSetViewport(cmd.cmd, 0, 1, *viewport);
+   vkCmdSetViewportWithCountEXT(cmd.cmd, 1, *viewport);
+
+   colorWriteMask := NewArray(description.colorTargets.count, VkColorComponentFlags,, temp);
+   for 0..colorWriteMask.count - 1 {
+      colorWriteMask[it] = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+   }
+   vkCmdSetColorWriteMaskEXT(cmd.cmd, 0, xx colorWriteMask.count, colorWriteMask.data);
+
+   rasterizationSamples := description.colorTargets[0].image.sampleCount;
+   vkCmdSetRasterizationSamplesEXT(cmd.cmd, xx rasterizationSamples);
+
+   sampleMask := u32.[U32_MAX, U32_MAX];
+   vkCmdSetSampleMaskEXT(cmd.cmd, xx rasterizationSamples, sampleMask.data);
 
 }
 
-UnsetRenderTarget :: (cmd: CommandBuffer) {
+EndRenderPass :: (cmd: *CommandBuffer) {
 
 }
 
-AcquireSwapchainImage :: (window: *Window) -> u32 {
-   defer window.cpuFrameTimeline += 1;
+// outputs to window.swapchainImageIndex
+AcquireSwapchainImage :: (window: *Window) {
+   window.cpuFrameTimeline += 1;
+
+   //
+   // the frameIndex calculated in Present must be the same as this one
+   // meaning that window.cpuFrameTimeline must be the same across the frame
+   // which means that i need to either increment window.cpuFrameTimeline at the start
+   // or at the end of the frame. right now i do it at the start of the frame in this function
+   //
 
    frameIndex := window.cpuFrameTimeline % window.acquireImageSemaphores.count;
    swapchainImageIndex: u32;
+
+   vkResult := vkWaitForFences(vk.device, 1, *window.queueSubmitFences[frameIndex], xx true, U64_MAX);
+   assert(vkResult == VK_SUCCESS);
+   vkResult = vkResetFences(vk.device, 1, *window.queueSubmitFences[frameIndex]);
+   assert(vkResult == VK_SUCCESS);
 
    while (true) {
       acquireImageResult := vkAcquireNextImageKHR(
@@ -376,10 +498,7 @@ AcquireSwapchainImage :: (window: *Window) -> u32 {
       break;
    }
 
-   vkResult := vkResetFences(vk.device, 1, *window.queueSubmitFences[frameIndex]);
-   assert(vkResult == VK_SUCCESS);
-
-   return swapchainImageIndex;
+   window.swapchainImageIndex = swapchainImageIndex;
 }
 
 StartCommandRecording :: () -> *CommandBuffer {
@@ -429,16 +548,54 @@ StartCommandRecording :: () -> *CommandBuffer {
    return commandBuffer;
 }
 
+// whatever AcquireSwapchainImage returned is presented
+// you should call AcquireSwapchainImage then this function in order.
+// you shouldnt call one of them one more than once without calling the other
+// there is no checks for this but it is hard to mess this up since you set up your main loop once
+Present :: (window: *Window) {
+   frameIndex := window.cpuFrameTimeline % window.swapchainImages.count;
+
+   presentInfo: VkPresentInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+      pNext = null,
+      waitSemaphoreCount = 1,
+      pWaitSemaphores = *window.queueSubmitSemaphores[frameIndex],
+      swapchainCount = 1,
+      pSwapchains = *window.swapchain,
+      pImageIndices = *window.swapchainImageIndex,
+   };
+
+   vkQueuePresentKHRResult := vkQueuePresentKHR(vk.graphicsQueue, *presentInfo);
+
+   if (vkQueuePresentKHRResult == VK_ERROR_OUT_OF_DATE_KHR || vkQueuePresentKHRResult == VK_SUBOPTIMAL_KHR || window.isFramebufferResized) {
+      RecreateSwapchain(window);
+      window.isFramebufferResized = false;
+   } else {
+      assert(vkQueuePresentKHRResult == VK_SUCCESS);
+   }
+}
+
+// ugly as design
+SubmitSwapchain :: (cmd: *CommandBuffer, window: *Window) {
+   frameIndex := window.cpuFrameTimeline % window.swapchainImages.count;
+   Submit(
+      cmd,
+      waitSemaphores = .[.{window.acquireImageSemaphores[frameIndex], 0 /* ignored for binary semaphores */}],
+      signalSemaphores = .[.{window.queueSubmitSemaphores[frameIndex], 0 /* ignored for binary semaphores */}],
+      fence = window.queueSubmitFences[frameIndex]
+   );
+}
+
 // every time you submit, the timeline semaphore is incremented
 // so if the counter reaches the value you submitted then it means that operations is done
 // so you can know which command buffers are finished executing.
 // store their signal value and if the counter exceeds that value then you are free to destroy/reset/reuse that command buffer
-Submit :: (cmd: *CommandBuffer) {
+Submit :: (cmd: *CommandBuffer, waitSemaphores: [] Semaphore = .{}, signalSemaphores: [] Semaphore = .{}, fence: VkFence = null) {
    vkResult := vkEndCommandBuffer(cmd.cmd);
    assert(vkResult == VK_SUCCESS);
 
-   lock(*vk.graphicsQueueSubmitMutex);
-   defer unlock(*vk.graphicsQueueSubmitMutex);
+   Thread.lock(*vk.graphicsQueueSubmitMutex);
+   defer Thread.unlock(*vk.graphicsQueueSubmitMutex);
 
    vk.graphicsQueueTimelineSemaphore.value += 1;
    cmd.doneTimelineValue = vk.graphicsQueueTimelineSemaphore.value;
@@ -449,8 +606,9 @@ Submit :: (cmd: *CommandBuffer) {
       commandBuffer = cmd.cmd,
    };
 
-   signalSemaphoreSubmitInfo: VkSemaphoreSubmitInfo;
-   signalSemaphoreSubmitInfo = .{
+   signalSemaphoreSubmitInfos := NewArray(signalSemaphores.count + 1, VkSemaphoreSubmitInfo,, temp);
+   // the queue timeline semaphore is always there
+   signalSemaphoreSubmitInfos[0] = .{
       sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
       pNext = null,
       semaphore = vk.graphicsQueueTimelineSemaphore.semaphore,
@@ -458,15 +616,34 @@ Submit :: (cmd: *CommandBuffer) {
       stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, // idk what i do
    };
 
+   for 1..signalSemaphoreSubmitInfos.count {
+      signalSemaphoreSubmitInfos[it] = .{
+         sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+         pNext = null,
+         semaphore = signalSemaphores[it].semaphore,
+         value = signalSemaphores[it].value,
+      };
+   };
+
+   waitSemaphoreSubmitInfos := NewArray(waitSemaphores.count, VkSemaphoreSubmitInfo,, temp);
+   for 0..waitSemaphoreSubmitInfos.count - 1 {
+      waitSemaphoreSubmitInfos[it] = .{
+         sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+         pNext = null,
+         semaphore = waitSemaphores[it].semaphore,
+         value = waitSemaphores[it].value,
+      };
+   };
+
    submitInfo2: VkSubmitInfo2 = .{
       sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
       pNext = null,
       commandBufferInfoCount = 1,
       pCommandBufferInfos = *commandBufferSubmitInfo,
-      signalSemaphoreInfoCount = 1,
-      pSignalSemaphoreInfos = *signalSemaphoreSubmitInfo,
-      waitSemaphoreInfoCount = 0,
-      pWaitSemaphoreInfos = null,
+      signalSemaphoreInfoCount = xx signalSemaphoreSubmitInfos.count,
+      pSignalSemaphoreInfos = signalSemaphoreSubmitInfos.data,
+      waitSemaphoreInfoCount = xx waitSemaphoreSubmitInfos.count,
+      pWaitSemaphoreInfos = waitSemaphoreSubmitInfos.data,
    };
 
    vkResult = vkQueueSubmit2(vk.graphicsQueue, 1, *submitInfo2, null);
@@ -679,7 +856,7 @@ InitializeVulkanAndWindow :: () -> indexIntoGlobalWindowsArray: StableIndexArray
    vkGetDeviceQueue(vk.device, vk.graphicsQueueFamilyIndexWithPresentSupport, 0, *vk.graphicsQueue);
    VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_QUEUE, xx vk.graphicsQueue, "vk.graphicsQueue");
    vk.graphicsQueueTimelineSemaphore = CreateTimelineSemaphore(debugName = "vk.graphicsQueueTimelineSemaphore");
-   init(*vk.graphicsQueueSubmitMutex);
+   Thread.init(*vk.graphicsQueueSubmitMutex);
 
    vulkanFunctions: VmaVulkanFunctions = .{
       vkGetInstanceProcAddr = vkGetInstanceProcAddr,
@@ -767,7 +944,7 @@ InitializeVulkanAndWindow :: () -> indexIntoGlobalWindowsArray: StableIndexArray
    return windowIndex;
 }
 
-CreateTimelineSemaphore :: (initialValue: u64 = 0, debugName := "") -> TimelineSemaphore {
+CreateTimelineSemaphore :: (initialValue: u64 = 0, debugName := "") -> Semaphore {
    typeCreateInfo: VkSemaphoreTypeCreateInfo = .{
       sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
       pNext = null,
