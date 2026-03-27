@@ -349,6 +349,13 @@ vk:                     VulkanThings;
 glfwWindowToWindow:     Table(*GLFWwindow, StableIndexArrayHandle); // index into "windows" array
 windows:                StableIndexArray(Window); // this array owns the windows
 
+//
+// BUG:
+// there is a bug when resizing window it stops rendering and weird glitches happen.
+// also sometimes after resizing it doesnt go back to normal and i have to resize again to make it go normal.
+// i guess the issue is 100% related to how i recreate swapchain
+//
+
 main :: () {
    InitializeThreads();
    windowIndex := InitializeVulkanAndWindow();
@@ -490,8 +497,6 @@ AcquireSwapchainImage :: (window: *Window) {
 
    vkResult := vkWaitForFences(vk.device, 1, *window.queueSubmitFences[frameIndex], xx true, U64_MAX);
    assert(vkResult == VK_SUCCESS);
-   vkResult = vkResetFences(vk.device, 1, *window.queueSubmitFences[frameIndex]);
-   assert(vkResult == VK_SUCCESS);
 
    while (true) {
       acquireImageResult := vkAcquireNextImageKHR(
@@ -512,6 +517,9 @@ AcquireSwapchainImage :: (window: *Window) {
 
       break;
    }
+
+   vkResult = vkResetFences(vk.device, 1, *window.queueSubmitFences[frameIndex]);
+   assert(vkResult == VK_SUCCESS);
 
    window.swapchainImageIndex = swapchainImageIndex;
 
@@ -1023,7 +1031,6 @@ InitializeVulkanAndWindow :: () -> indexIntoGlobalWindowsArray: StableIndexArray
    }
 
    CreateSwapchain(window);
-   CreatePerFrameBuffers(window);
 
    return windowIndex;
 }
@@ -1155,17 +1162,24 @@ RecreateSwapchain :: (window: *Window) {
 }
 
 DestroySwapchain :: (window: *Window) {
-   for window.swapchainImages {
-      vkDestroyImageView(vk.device, it.view, null);
+   for 0..window.swapchainImages.count - 1 {
+      vkDestroyImageView(vk.device, window.swapchainImages[it].view, null);
+      vkDestroySemaphore(vk.device, window.acquireImageSemaphores[it], null);
+      vkDestroySemaphore(vk.device, window.queueSubmitSemaphores[it], null);
+      vkDestroyFence(vk.device, window.queueSubmitFences[it], null);
    }
 
    vkDestroySwapchainKHR(vk.device, window.swapchain, null);
+
+   free(window.swapchainImages.data);
+   free(window.acquireImageSemaphores.data);
+   free(window.queueSubmitSemaphores.data);
+   free(window.queueSubmitFences.data);
 }
 
 CreateWindow :: (width: int, height: int, title: string) -> resultPtrButNotStableIfUnderlyingArrayResizes: *Window, indexIntoGlobalWindowsArray: StableIndexArrayHandle {
    windowPtr, windowIndex := CreateWindowThePartBeforeDeviceCreation(width, height, title);
    CreateSwapchain(windowPtr);
-   CreatePerFrameBuffers(windowPtr);
    return windowPtr, windowIndex;
 }
 
@@ -1255,11 +1269,15 @@ CreateSwapchain :: (window: *Window) {
       VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_IMAGE, xx window.swapchainImages[it].image, window.swapchainImages[it].debugName);
       VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_IMAGE_VIEW, xx window.swapchainImages[it].view, tprint("%[ImageView]", window.swapchainImages[it].debugName));
    }
-}
 
-CreatePerFrameBuffers :: (window: *Window) {
-   swapchainImageCount := window.swapchainImages.count;
-   assert(swapchainImageCount > 0, "call CreateSwapchain first");
+   //
+   // per frame buffers is part of swapchain becasue when you recreate the swapchain
+   // you might (prolly not) get a new image count since it is the driver that decides it
+   // so i have to readjust the sync objects. i can do like if size didnt change then do nothing
+   // if changed then recreate but unnecessary complexity just recreate. also who the fuck resizes a window
+   // when playing a game anyways
+   //       - apila, 27/03/26
+   //
 
    // per frame buffers
    window.acquireImageSemaphores = NewArray(swapchainImageCount, VkSemaphore);
