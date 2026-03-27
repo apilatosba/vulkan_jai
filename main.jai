@@ -362,10 +362,26 @@ main :: () {
 
       cmd := StartCommandRecording();
 
-      Submit(cmd); // when cmd doesnt render to swapchain.
-      SubmitSwapchain(cmd, window); // when cmd renders to swapchain
+      timeSinceStart: float = xx glfwGetTime();
 
-      Present(window);
+      renderPassDescription: RenderPassDescription = .{
+         colorTargets = .[
+            .{
+               image = *window.swapchainImages[window.swapchainImageIndex],
+               hasClearValue = true,
+               clearValue = .{
+                  color = .{ sin(10 * timeSinceStart), sin(20 * timeSinceStart), sin(30 * timeSinceStart), 1 }
+               },
+            },
+         ],
+         hasDepthTarget = false,
+         hasStencilTarget = false,
+      };
+
+      BeginRenderPass(cmd, renderPassDescription);
+      EndRenderPass(cmd);
+
+      SubmitAndPresent(cmd, window);
    }
 }
 
@@ -452,11 +468,10 @@ BeginRenderPass :: (cmd: *CommandBuffer, description: RenderPassDescription) {
 
    sampleMask := u32.[U32_MAX, U32_MAX];
    vkCmdSetSampleMaskEXT(cmd.cmd, xx rasterizationSamples, sampleMask.data);
-
 }
 
 EndRenderPass :: (cmd: *CommandBuffer) {
-
+   vkCmdEndRendering(cmd.cmd);
 }
 
 // outputs to window.swapchainImageIndex
@@ -499,6 +514,42 @@ AcquireSwapchainImage :: (window: *Window) {
    }
 
    window.swapchainImageIndex = swapchainImageIndex;
+
+   // transition layout to general
+   {
+      cmd := StartCommandRecording();
+      defer Submit(cmd);
+
+      barrier: VkImageMemoryBarrier2 = .{
+         sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+         pNext = null,
+         oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+         newLayout = VK_IMAGE_LAYOUT_GENERAL,
+         srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         image = window.swapchainImages[window.swapchainImageIndex].image,
+         subresourceRange = .{
+            aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            baseMipLevel = 0,
+            levelCount = 1,
+            baseArrayLayer = 0,
+            layerCount = 1
+         },
+         srcAccessMask = VK_ACCESS_2_NONE,
+         srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+         dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+         dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+      };
+
+      dependencyInfo: VkDependencyInfo = .{
+         sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+         pNext = null,
+         imageMemoryBarrierCount = 1,
+         pImageMemoryBarriers = *barrier
+      };
+
+      vkCmdPipelineBarrier2(cmd.cmd, *dependencyInfo);
+   }
 }
 
 StartCommandRecording :: () -> *CommandBuffer {
@@ -552,8 +603,52 @@ StartCommandRecording :: () -> *CommandBuffer {
 // you should call AcquireSwapchainImage then this function in order.
 // you shouldnt call one of them one more than once without calling the other
 // there is no checks for this but it is hard to mess this up since you set up your main loop once
-Present :: (window: *Window) {
+//
+// ugly as design
+// but this ugly ass design comes from the ugly ass design of vulkan swapchain and their special
+// synchronization designs. so it is okay
+SubmitAndPresent :: (cmd: *CommandBuffer, window: *Window) {
    frameIndex := window.cpuFrameTimeline % window.swapchainImages.count;
+
+   // transition layout to present
+   {
+      barrier: VkImageMemoryBarrier2 = .{
+         sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+         pNext = null,
+         oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+         newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+         srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         image = window.swapchainImages[window.swapchainImageIndex].image,
+         subresourceRange = .{
+            aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            baseMipLevel = 0,
+            levelCount = 1,
+            baseArrayLayer = 0,
+            layerCount = 1
+         },
+         srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+         srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+         dstAccessMask = VK_ACCESS_2_NONE,
+         dstStageMask = VK_PIPELINE_STAGE_2_NONE,
+      };
+
+      dependencyInfo: VkDependencyInfo = .{
+         sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+         pNext = null,
+         imageMemoryBarrierCount = 1,
+         pImageMemoryBarriers = *barrier
+      };
+
+      vkCmdPipelineBarrier2(cmd.cmd, *dependencyInfo);
+   }
+
+   Submit(
+      cmd,
+      waitSemaphores = .[.{window.acquireImageSemaphores[frameIndex], 0 /* ignored for binary semaphores */}],
+      signalSemaphores = .[.{window.queueSubmitSemaphores[frameIndex], 0 /* ignored for binary semaphores */}],
+      fence = window.queueSubmitFences[frameIndex]
+   );
 
    presentInfo: VkPresentInfoKHR = .{
       sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -573,17 +668,6 @@ Present :: (window: *Window) {
    } else {
       assert(vkQueuePresentKHRResult == VK_SUCCESS);
    }
-}
-
-// ugly as design
-SubmitSwapchain :: (cmd: *CommandBuffer, window: *Window) {
-   frameIndex := window.cpuFrameTimeline % window.swapchainImages.count;
-   Submit(
-      cmd,
-      waitSemaphores = .[.{window.acquireImageSemaphores[frameIndex], 0 /* ignored for binary semaphores */}],
-      signalSemaphores = .[.{window.queueSubmitSemaphores[frameIndex], 0 /* ignored for binary semaphores */}],
-      fence = window.queueSubmitFences[frameIndex]
-   );
 }
 
 // every time you submit, the timeline semaphore is incremented
@@ -616,12 +700,12 @@ Submit :: (cmd: *CommandBuffer, waitSemaphores: [] Semaphore = .{}, signalSemaph
       stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, // idk what i do
    };
 
-   for 1..signalSemaphoreSubmitInfos.count {
+   for 1..signalSemaphores.count {
       signalSemaphoreSubmitInfos[it] = .{
          sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
          pNext = null,
-         semaphore = signalSemaphores[it].semaphore,
-         value = signalSemaphores[it].value,
+         semaphore = signalSemaphores[it - 1].semaphore,
+         value = signalSemaphores[it - 1].value,
       };
    };
 
@@ -646,7 +730,7 @@ Submit :: (cmd: *CommandBuffer, waitSemaphores: [] Semaphore = .{}, signalSemaph
       pWaitSemaphoreInfos = waitSemaphoreSubmitInfos.data,
    };
 
-   vkResult = vkQueueSubmit2(vk.graphicsQueue, 1, *submitInfo2, null);
+   vkResult = vkQueueSubmit2(vk.graphicsQueue, 1, *submitInfo2, fence);
    assert(vkResult == VK_SUCCESS);
 }
 
