@@ -353,7 +353,10 @@ windows:                StableIndexArray(Window); // this array owns the windows
 // BUG:
 // there is a bug when resizing window it stops rendering and weird glitches happen.
 // also sometimes after resizing it doesnt go back to normal and i have to resize again to make it go normal.
-// i guess the issue is 100% related to how i recreate swapchain
+// i guess the issue is related to how i recreate swapchain
+//
+// i checked the bgfx examples and the behaviour is the exact same as mine
+// idk maybe it is my pc (driver or x11 or the combination of both)
 //
 
 main :: () {
@@ -377,7 +380,7 @@ main :: () {
                image = *window.swapchainImages[window.swapchainImageIndex],
                hasClearValue = true,
                clearValue = .{
-                  color = .{ sin(10 * timeSinceStart), sin(20 * timeSinceStart), sin(30 * timeSinceStart), 1 }
+                  color = .{ (sin(10 * timeSinceStart) + 1) / 2, (sin(20 * timeSinceStart) + 1) / 2, (sin(30 * timeSinceStart) + 1) / 2, 1 }
                },
             },
          ],
@@ -389,6 +392,8 @@ main :: () {
       EndRenderPass(cmd);
 
       SubmitAndPresent(cmd, window);
+
+      reset_temporary_storage();
    }
 }
 
@@ -1025,7 +1030,7 @@ InitializeVulkanAndWindow :: () -> indexIntoGlobalWindowsArray: StableIndexArray
    vk.surfaceFormat = ChooseSwapSurfaceFormat(surfaceFormats);
    vk.presentMode = ChooseSwapPresentMode(presentModes);
 
-   vk.commandPools = NewArray(threadCount, CommandPool);
+   vk.commandPools = NewArray(threadCount, CommandPool); // not a leak. vk is a global thingy
    for 0..threadCount - 1 {
       vk.commandPools[it].commandPool = CreateCommandPool(vk.graphicsQueueFamilyIndexWithPresentSupport);
    }
@@ -1518,6 +1523,7 @@ ChoosePhysicalDevice :: (instance: VkInstance) -> VkPhysicalDevice {
 
 FilterGpusThatSupportMeshShaders :: (gpus: [] VkPhysicalDevice) -> [] VkPhysicalDevice {
    filteredGpus: [..] VkPhysicalDevice;
+   filteredGpus.allocator = temp;
 
    for gpus {
       meshShaderFeatures: VkPhysicalDeviceMeshShaderFeaturesEXT = .{
