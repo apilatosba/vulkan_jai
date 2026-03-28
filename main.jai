@@ -8,6 +8,7 @@
 Thread :: #import "Thread";
 #import "System";
 #import "ApilaDispatch";
+#import "File";
 
 #if OS == .LINUX {
    #import "POSIX";
@@ -284,6 +285,7 @@ Window :: struct {
 VulkanThings :: struct {
    instance:                                    VkInstance;
    physicalDevice:                              VkPhysicalDevice;
+   physicalDeviceProperties:                    VkPhysicalDeviceProperties;
    maxMsaaSamples:                              VkSampleCountFlags;
    graphicsQueueFamilyIndexWithPresentSupport:  u32;
    device:                                      VkDevice;
@@ -297,6 +299,9 @@ VulkanThings :: struct {
    graphicsQueue:                               VkQueue;    // TODO add a transfer queue if youd like
    graphicsQueueTimelineSemaphore:              Semaphore;
    graphicsQueueSubmitMutex:                    Thread.Mutex;
+
+   gpuPointerToAllocationInfos:                 Table(u64, AllocationInfo); // storing it in a table so i can free it using the pointer returned by GpuMalloc in GpuFree
+   gpuPointerToAllocationInfosMutex:            Thread.Mutex; // i have mutex since GpuMalloc and GpuFree can be accessed from multiple threads
 }
 
 // stores a single VkCommandBuffer and all the command buffers allocated from it
@@ -344,6 +349,23 @@ RenderPassDescription :: struct {
    stencilTarget:       RenderPassAttachmentInfo;
 }
 
+MeshletPipeline :: struct {
+   task:       VkShaderEXT;
+   mesh:       VkShaderEXT;
+   fragment:   VkShaderEXT;
+}
+
+MemoryType :: enum {
+   Default  :: 0; // cpu visible
+   Gpu      :: 1; // not cpu visible (even if it is, cpu says it will not read nor write to the memory)
+   Readback :: 2;
+}
+
+AllocationInfo :: struct {
+   buffer:        VkBuffer;
+   allocation:    VmaAllocation;
+}
+
 // globals
 vk:                     VulkanThings;
 glfwWindowToWindow:     Table(*GLFWwindow, *Window /* allocated on heap (pointer is stable throughout the lifetime of the window) */);
@@ -362,6 +384,23 @@ main :: () {
    InitializeThreads();
    window := InitializeVulkanAndWindow();
 
+   meshSpvString := read_entire_file("mesh.spv");
+   fragSpvString := read_entire_file("frag.spv");
+   meshSpv: [] u8 = .{
+      count = meshSpvString.count,
+      data = meshSpvString.data
+   };
+
+   fragSpv: [] u8 = .{
+      count = fragSpvString.count,
+      data = fragSpvString.data
+   };
+
+   pipeline := CreateMeshletPipeline(.{}, meshSpv, fragSpv);
+   defer DestroyMeshletPipeline(pipeline);
+   fragmentDataCpu, fragmentDataGpu := GpuMalloc(Vector4, 1);
+   defer GpuFree(fragmentDataGpu);
+
    while (!glfwWindowShouldClose(window.window)) {
       AcquireSwapchainImage(window);
       glfwPollEvents();
@@ -369,6 +408,7 @@ main :: () {
       cmd := StartCommandRecording();
 
       timeSinceStart: float = xx glfwGetTime();
+      fragmentDataCpu[0] = .{ (sin(10 * timeSinceStart) + 1) / 2, (sin(20 * timeSinceStart) + 1) / 2, (sin(30 * timeSinceStart) + 1) / 2, 1 };
 
       renderPassDescription: RenderPassDescription = .{
          colorTargets = .[
@@ -376,7 +416,7 @@ main :: () {
                image = *window.swapchainImages[window.swapchainImageIndex],
                hasClearValue = true,
                clearValue = .{
-                  color = .{ (sin(10 * timeSinceStart) + 1) / 2, (sin(20 * timeSinceStart) + 1) / 2, (sin(30 * timeSinceStart) + 1) / 2, 1 }
+                  color = .{ 1, 0, 1, 1 }
                },
             },
          ],
@@ -384,13 +424,251 @@ main :: () {
          hasStencilTarget = false,
       };
 
-      BeginRenderPass(cmd, renderPassDescription);
-      EndRenderPass(cmd);
+      {
+         BeginRenderPass(cmd, renderPassDescription);
+         defer EndRenderPass(cmd);
+
+         BindMeshletPipeline(cmd, pipeline);
+         DispatchMesh(cmd, 0, 0, fragmentDataGpu, 1, 1, 1);
+      }
 
       SubmitAndPresent(cmd, window);
 
       reset_temporary_storage();
    }
+}
+
+DispatchMesh :: (cmd: *CommandBuffer, taskDataPointer: u64, meshDataPointer: u64, fragmentDataPointer: u64, x: u32, y: u32, z: u32) {
+   data := u64.[
+      taskDataPointer,
+      meshDataPointer,
+      fragmentDataPointer
+   ];
+
+   pushDataInfo: VkPushDataInfoEXT = .{
+      sType = VK_STRUCTURE_TYPE_PUSH_DATA_INFO_EXT,
+      pNext = null,
+      offset = 0,
+      data = .{ data.data, data.count * size_of(u64) }
+   };
+
+   vkCmdPushDataEXT(cmd.cmd, *pushDataInfo);
+   vkCmdDrawMeshTasksEXT(cmd.cmd, x, y, z);
+}
+
+BindMeshletPipeline :: (cmd: *CommandBuffer, pipeline: MeshletPipeline) {
+   // Validation Error: [ VUID_Undefined ] | MessageID = 0x79de34d4
+   // vkCmdDrawMeshTasksEXT(): There is no graphics pipeline bound and vkCmdBindShadersEXT() was not called with stage VK_SHADER_STAGE_VERTEX_BIT and either VK_NULL_HANDLE
+   // or a valid VK_SHADER_STAGE_VERTEX_BIT shader (Even if you are using a mesh shader, a VK_NULL_HANDLE must be bound to the vertex stage).
+   STAGE_COUNT: u32 : 3 + 1; // +1 for vertex stage
+
+   stages: [STAGE_COUNT] VkShaderStageFlags = .[
+      VK_SHADER_STAGE_TASK_BIT_EXT,
+      VK_SHADER_STAGE_MESH_BIT_EXT,
+      VK_SHADER_STAGE_FRAGMENT_BIT,
+      VK_SHADER_STAGE_VERTEX_BIT
+   ];
+
+   shaders: [STAGE_COUNT] VkShaderEXT = .[
+      pipeline.task,
+      pipeline.mesh,
+      pipeline.fragment,
+      null
+   ];
+
+   vkCmdBindShadersEXT(cmd.cmd, STAGE_COUNT, stages.data, shaders.data);
+}
+
+GpuMalloc :: ($T: Type, count: int, type: MemoryType = .Default, debugName := "") -> cpu: [] T, gpu: u64 {
+   cpu, gpu := GpuMalloc(size_of(T) * count, type, debugName);
+
+   array: [] T;
+   array.count = count;
+   array.data = cpu;
+   return array, gpu;
+}
+
+// what about alignment?
+GpuMalloc :: (size: s64, type: MemoryType = .Default, debugName := "") -> cpu: *void, gpu: u64 {
+   memoryPropertyFlags: VkMemoryPropertyFlags;
+   memoryUsage: VmaMemoryUsage;
+
+   if #complete type == {
+      case .Default; {
+         memoryUsage = .CPU_TO_GPU;
+         memoryPropertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+      }
+
+      case .Gpu; {
+         memoryUsage = .GPU_ONLY;
+         memoryPropertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+      }
+
+      case .Readback; {
+         memoryUsage = .GPU_TO_CPU;
+         memoryPropertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+      }
+   }
+
+   bufferCreateInfo: VkBufferCreateInfo = .{
+      sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      pNext = null,
+      size = xx size,
+      usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+      sharingMode = VK_SHARING_MODE_EXCLUSIVE, // only one queue family can use this buffer at a time.
+   };
+
+   allocationCreateInfo: VmaAllocationCreateInfo = .{
+      flags = ifx type == .Gpu then 0 else VmaAllocationCreateFlagBits.MAPPED_BIT.(u32),
+      usage = memoryUsage,
+      requiredFlags = memoryPropertyFlags,
+   };
+
+   outBuffer: VkBuffer;
+   outVmaAllocation: VmaAllocation;
+   outVmaAllocationInfo: VmaAllocationInfo;
+   vkResult := vmaCreateBuffer(vk.vmaAllocator, *bufferCreateInfo, *allocationCreateInfo, *outBuffer, *outVmaAllocation, *outVmaAllocationInfo);
+   if (vkResult != VK_SUCCESS) {
+      return null, 0;
+   }
+
+   if (debugName.count != 0) {
+      vkResult = VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_BUFFER, xx outBuffer, tprint("%[Buffer]", debugName));
+      assert(vkResult == VK_SUCCESS);
+      vkResult = VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_DEVICE_MEMORY, xx outVmaAllocationInfo.deviceMemory, tprint("[Device Memory]", debugName));
+      assert(vkResult == VK_SUCCESS);
+   }
+
+   addressInfo: VkBufferDeviceAddressInfo = .{
+      sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+      pNext = null,
+      buffer = outBuffer,
+   };
+
+   gpuPointer := vkGetBufferDeviceAddress(vk.device, *addressInfo);
+    if gpuPointer == 0 {
+        vmaDestroyBuffer(vk.vmaAllocator, outBuffer, outVmaAllocation);
+        return null, 0;
+    }
+
+   cpuPointer := ifx type == .Gpu then null else outVmaAllocationInfo.pMappedData;
+
+   Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
+   table_add(*vk.gpuPointerToAllocationInfos, gpuPointer, .{ outBuffer, outVmaAllocation });
+   Thread.unlock(*vk.gpuPointerToAllocationInfosMutex);
+
+   return cpuPointer, gpuPointer;
+}
+
+GpuFree :: (gpuPointer: u64) {
+   Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
+   ok, allocationInfo := table_remove(*vk.gpuPointerToAllocationInfos, gpuPointer);
+   Thread.unlock(*vk.gpuPointerToAllocationInfosMutex);
+
+   assert(ok, "you freed without malloc!");
+
+   vmaDestroyBuffer(vk.vmaAllocator, allocationInfo.buffer, allocationInfo.allocation);
+}
+
+CreateMeshletPipeline :: (taskSpirv: [] u8,
+                          meshSpirv: [] u8,
+                          fragmentSpirv: [] u8,
+                          debugName := "",
+                          taskEntryPointName := "ApilaTS",
+                          meshEntryPointName := "ApilaMS",
+                          fragmentEntryPointName := "ApilaFS") -> MeshletPipeline {
+   STAGE_COUNT :: 3;
+   createInfos: [STAGE_COUNT] VkShaderCreateInfoEXT = .[
+      // task
+      .{
+         sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
+         pNext = null,
+         flags = VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT | VK_SHADER_CREATE_LINK_STAGE_BIT_EXT,
+         stage = VK_SHADER_STAGE_TASK_BIT_EXT,
+         nextStage = VK_SHADER_STAGE_MESH_BIT_EXT,
+         codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+         codeSize = xx taskSpirv.count,
+         pCode = taskSpirv.data,
+         pName = to_c_string(taskEntryPointName,, temp),
+         setLayoutCount = 0, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+         pSetLayouts = null, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+         pushConstantRangeCount = 0, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+         pPushConstantRanges = null, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+         // pSpecializationInfo = // might use this in the future Clueless
+      },
+
+      // mesh
+      .{
+         sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
+         pNext = null,
+         flags = VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT | VK_SHADER_CREATE_LINK_STAGE_BIT_EXT | (ifx taskSpirv.count == 0 then VK_SHADER_CREATE_NO_TASK_SHADER_BIT_EXT else 0),
+         stage = VK_SHADER_STAGE_MESH_BIT_EXT,
+         nextStage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+         codeSize = xx meshSpirv.count,
+         pCode = meshSpirv.data,
+         pName = to_c_string(meshEntryPointName,, temp),
+         setLayoutCount = 0, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+         pSetLayouts = null, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+         pushConstantRangeCount = 0, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+         pPushConstantRanges = null, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+         // pSpecializationInfo = // might use this in the future Clueless
+      },
+
+      // fragment
+      .{
+         sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
+         pNext = null,
+         flags = VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT | VK_SHADER_CREATE_LINK_STAGE_BIT_EXT,
+         stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         nextStage = 0,
+         codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+         codeSize = xx fragmentSpirv.count,
+         pCode = fragmentSpirv.data,
+         pName = to_c_string(fragmentEntryPointName,, temp),
+         setLayoutCount = 0, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+         pSetLayouts = null, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+         pushConstantRangeCount = 0, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+         pPushConstantRanges = null, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+         // pSpecializationInfo = // might use this in the future Clueless
+      }
+   ];
+
+   // [0] = task, [1] = mesh, [2] = fragment
+   outShaders: [STAGE_COUNT] VkShaderEXT;
+
+   shaderCount: u32 = xx ifx taskSpirv.count == 0 then 2 else 3;
+   offset := ifx shaderCount == 3 then 0 else 1;
+   vkResult := vkCreateShadersEXT(vk.device, shaderCount, createInfos.data + offset, null, outShaders.data + offset);
+   assert(vkResult == VK_SUCCESS);
+
+   if (debugName.count != 0) {
+      if (taskSpirv.count != 0) {
+         vkResult = VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_SHADER_EXT, xx outShaders[0], tprint("%[task]", debugName));
+         assert(vkResult == VK_SUCCESS);
+      }
+
+      vkResult = VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_SHADER_EXT, xx outShaders[1], tprint("%[mesh]", debugName));
+      assert(vkResult == VK_SUCCESS);
+
+      vkResult = VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_SHADER_EXT, xx outShaders[2], tprint("%[fragment]", debugName));
+      assert(vkResult == VK_SUCCESS);
+   }
+
+   return .{
+      outShaders[0],
+      outShaders[1],
+      outShaders[2]
+   };
+}
+
+DestroyMeshletPipeline :: (using pipeline: MeshletPipeline) {
+   if (task != null) {
+      vkDestroyShaderEXT(vk.device, task, null);
+   }
+
+   vkDestroyShaderEXT(vk.device, mesh, null);
+   vkDestroyShaderEXT(vk.device, fragment, null);
 }
 
 GetImageViewFromRenderPassAttachmentInfo :: (info: RenderPassAttachmentInfo) -> VkImageView {
@@ -476,6 +754,22 @@ BeginRenderPass :: (cmd: *CommandBuffer, description: RenderPassDescription) {
 
    sampleMask := u32.[U32_MAX, U32_MAX];
    vkCmdSetSampleMaskEXT(cmd.cmd, xx rasterizationSamples, sampleMask.data);
+
+   vkCmdSetRasterizerDiscardEnable(cmd.cmd, xx false);
+   vkCmdSetFrontFace(cmd.cmd, VK_FRONT_FACE_COUNTER_CLOCKWISE);
+   vkCmdSetCullMode(cmd.cmd, VK_CULL_MODE_BACK_BIT);
+   vkCmdSetDepthTestEnable(cmd.cmd, xx true);
+   vkCmdSetStencilTestEnable(cmd.cmd, xx false);
+   vkCmdSetDepthBiasEnable(cmd.cmd, xx false);
+   vkCmdSetPolygonModeEXT(cmd.cmd, VK_POLYGON_MODE_FILL);
+   vkCmdSetDepthClampEnableEXT(cmd.cmd, xx false);
+   vkCmdSetAlphaToCoverageEnableEXT(cmd.cmd, xx false);
+
+   colorBlendEnables := VkBool32.[xx false];
+   vkCmdSetColorBlendEnableEXT(cmd.cmd, 0, 1, colorBlendEnables.data);
+
+   vkCmdSetDepthCompareOp(cmd.cmd, VK_COMPARE_OP_LESS);
+   vkCmdSetDepthWriteEnable(cmd.cmd, xx true);
 }
 
 EndRenderPass :: (cmd: *CommandBuffer) {
@@ -610,7 +904,7 @@ StartCommandRecording :: () -> *CommandBuffer {
 
 // whatever AcquireSwapchainImage returned is presented
 // you should call AcquireSwapchainImage then this function in order.
-// you shouldnt call one of them one more than once without calling the other
+// you shouldnt call one of them more than once without calling the other
 // there is no checks for this but it is hard to mess this up since you set up your main loop once
 //
 // ugly as design
@@ -803,13 +1097,12 @@ InitializeVulkanAndWindow :: () -> *Window {
    load_vulkan_instance_procedures(vk.instance);
 
    vk.physicalDevice = ChoosePhysicalDevice(vk.instance);
-   physicalDeviceProperties: VkPhysicalDeviceProperties;
    physicalDeviceFeatures: VkPhysicalDeviceFeatures;
-   vkGetPhysicalDeviceProperties(vk.physicalDevice, *physicalDeviceProperties);
+   vkGetPhysicalDeviceProperties(vk.physicalDevice, *vk.physicalDeviceProperties);
    vkGetPhysicalDeviceFeatures(vk.physicalDevice, *physicalDeviceFeatures);
-   print("Selected physical device: %\n", to_string(physicalDeviceProperties.deviceName.data));
-   print("API version: %\n", VkVersionToString(physicalDeviceProperties.apiVersion,, temp));
-   maxMsaaSamples := GetMaxSupportedMsaaSamples(physicalDeviceProperties);
+   print("Selected physical device: %\n", to_string(vk.physicalDeviceProperties.deviceName.data));
+   print("API version: %\n", VkVersionToString(vk.physicalDeviceProperties.apiVersion,, temp));
+   maxMsaaSamples := GetMaxSupportedMsaaSamples(vk.physicalDeviceProperties);
    vk.maxMsaaSamples = maxMsaaSamples;
 
    deviceExtensionProperties: [] VkExtensionProperties;
@@ -827,6 +1120,7 @@ InitializeVulkanAndWindow :: () -> *Window {
       to_c_string(VK_EXT_MESH_SHADER_EXTENSION_NAME,, temp),
       to_c_string(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,, temp),
       to_c_string(VK_EXT_SHADER_OBJECT_EXTENSION_NAME,, temp),
+      to_c_string(VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,, temp),
       // VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME // promoted to core in 1.3
    ];
 
@@ -839,7 +1133,7 @@ InitializeVulkanAndWindow :: () -> *Window {
          }
       }
 
-      assert(found, "Device extension % not found in the selected device %\n", to_string(deviceExtensionToEnable), to_string(physicalDeviceProperties.deviceName.data));
+      assert(found, "Device extension % not found in the selected device %\n", to_string(deviceExtensionToEnable), to_string(vk.physicalDeviceProperties.deviceName.data));
    }
 
    vk.graphicsQueueFamilyIndexWithPresentSupport = U32_MAX;
@@ -889,9 +1183,15 @@ InitializeVulkanAndWindow :: () -> *Window {
       depthClamp = xx true,
    };
 
+   descriptorHeapFeaturesEXT: VkPhysicalDeviceDescriptorHeapFeaturesEXT = .{
+      sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT,
+      pNext = null,
+      descriptorHeap = xx true,
+   };
+
    shaderObjectFeaturesExt: VkPhysicalDeviceShaderObjectFeaturesEXT = .{
       sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
-      pNext = null,
+      pNext = *descriptorHeapFeaturesEXT,
       shaderObject = xx true,
    };
 
@@ -927,6 +1227,7 @@ InitializeVulkanAndWindow :: () -> *Window {
       // descriptorIndexing = true,
       storageBuffer8BitAccess = xx true,
       timelineSemaphore = xx true,
+      bufferDeviceAddress = xx true,
    };
 
    deviceCreateInfo: VkDeviceCreateInfo = .{
@@ -985,8 +1286,8 @@ InitializeVulkanAndWindow :: () -> *Window {
       physicalDevice = vk.physicalDevice,
       device = vk.device,
       instance = vk.instance,
-      flags = xx VmaAllocatorCreateFlagBits.KHR_MAINTENANCE4_BIT,
-      vulkanApiVersion = physicalDeviceProperties.apiVersion,
+      flags = xx VmaAllocatorCreateFlagBits.KHR_MAINTENANCE4_BIT | VmaAllocatorCreateFlagBits.BUFFER_DEVICE_ADDRESS_BIT,
+      vulkanApiVersion = vk.physicalDeviceProperties.apiVersion,
       pVulkanFunctions = *vulkanFunctions,
    };
 
@@ -1032,6 +1333,8 @@ InitializeVulkanAndWindow :: () -> *Window {
    }
 
    CreateSwapchain(window);
+
+   Thread.init(*vk.gpuPointerToAllocationInfosMutex);
 
    return window;
 }
