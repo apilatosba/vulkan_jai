@@ -346,8 +346,7 @@ RenderPassDescription :: struct {
 
 // globals
 vk:                     VulkanThings;
-glfwWindowToWindow:     Table(*GLFWwindow, StableIndexArrayHandle); // index into "windows" array
-windows:                StableIndexArray(Window); // this array owns the windows
+glfwWindowToWindow:     Table(*GLFWwindow, *Window /* allocated on heap (pointer is stable throughout the lifetime of the window) */);
 
 //
 // BUG:
@@ -361,12 +360,9 @@ windows:                StableIndexArray(Window); // this array owns the windows
 
 main :: () {
    InitializeThreads();
-   windowIndex := InitializeVulkanAndWindow();
+   window := InitializeVulkanAndWindow();
 
-   window := Get(*windows, windowIndex);
    while (!glfwWindowShouldClose(window.window)) {
-      defer window = Get(*windows, windowIndex);
-
       AcquireSwapchainImage(window);
       glfwPollEvents();
 
@@ -747,7 +743,7 @@ Submit :: (cmd: *CommandBuffer, waitSemaphores: [] Semaphore = .{}, signalSemaph
    assert(vkResult == VK_SUCCESS);
 }
 
-InitializeVulkanAndWindow :: () -> indexIntoGlobalWindowsArray: StableIndexArrayHandle {
+InitializeVulkanAndWindow :: () -> *Window {
    #if OS == .LINUX {
       vulkan := dlopen("libvulkan.so.1", RTLD_LAZY);
       assert(vulkan != null);
@@ -854,7 +850,7 @@ InitializeVulkanAndWindow :: () -> indexIntoGlobalWindowsArray: StableIndexArray
    queueFamilyProperties.data = temporary_alloc(queueFamilyCount * size_of(VkQueueFamilyProperties)); // jai doesnt allow to allocate on the stack
    vkGetPhysicalDeviceQueueFamilyProperties(vk.physicalDevice, *queueFamilyCount, queueFamilyProperties.data);
 
-   window, windowIndex := CreateWindowThePartBeforeDeviceCreation(640, 480, "kayu4");
+   window := CreateWindowThePartBeforeDeviceCreation(640, 480, "kayu4");
 
    for 0..queueFamilyCount - 1 {
       graphicsSupport := false;
@@ -1037,7 +1033,7 @@ InitializeVulkanAndWindow :: () -> indexIntoGlobalWindowsArray: StableIndexArray
 
    CreateSwapchain(window);
 
-   return windowIndex;
+   return window;
 }
 
 CreateTimelineSemaphore :: (initialValue: u64 = 0, debugName := "") -> Semaphore {
@@ -1182,10 +1178,10 @@ DestroySwapchain :: (window: *Window) {
    free(window.queueSubmitFences.data);
 }
 
-CreateWindow :: (width: int, height: int, title: string) -> resultPtrButNotStableIfUnderlyingArrayResizes: *Window, indexIntoGlobalWindowsArray: StableIndexArrayHandle {
-   windowPtr, windowIndex := CreateWindowThePartBeforeDeviceCreation(width, height, title);
-   CreateSwapchain(windowPtr);
-   return windowPtr, windowIndex;
+CreateWindow :: (width: int, height: int, title: string) -> *Window {
+   window := CreateWindowThePartBeforeDeviceCreation(width, height, title);
+   CreateSwapchain(window);
+   return window;
 }
 
 // outputs to window.swapchain
@@ -1322,8 +1318,8 @@ CreateSwapchain :: (window: *Window) {
 }
 
 // creates glfw window and vulkan surface attached to it
-CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: string) -> resultPtrButNotStableIfUnderlyingArrayResizes: *Window, indexIntoGlobalWindowsArray: StableIndexArrayHandle {
-   result: Window;
+CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: string) -> *Window {
+   result := New(Window); // free when destroying window
    result.window = glfwCreateWindow(xx width, xx height, to_c_string(title,, temp), null, null);
 
    if (result.window == null) {
@@ -1349,9 +1345,8 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
 
    WindowSizeCallback: GLFWwindowsizefun : (glfwWindow: *GLFWwindow, width: s32, height: s32) #c_call {
       push_context {
-         found, windowIndex := table_find(*glfwWindowToWindow, glfwWindow);
+         found, window := table_find(*glfwWindowToWindow, glfwWindow);
          assert(found);
-         window := Get(*windows, windowIndex);
          window.width = width;
          window.height = height;
       }
@@ -1379,9 +1374,8 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
       }
 
       push_context {
-         found, windowIndex := table_find(*glfwWindowToWindow, glfwWindow);
+         found, window := table_find(*glfwWindowToWindow, glfwWindow);
          assert(found);
-         window := Get(*windows, windowIndex);
 
          polledEvent: PolledEvent;
          polledEvent.type = .Key;
@@ -1397,9 +1391,8 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
 
    CharCallback: GLFWcharfun : (glfwWindow: *GLFWwindow, c: u32) #c_call {
       push_context {
-         found, windowIndex := table_find(*glfwWindowToWindow, glfwWindow);
+         found, window := table_find(*glfwWindowToWindow, glfwWindow);
          assert(found);
-         window := Get(*windows, windowIndex);
 
          Enqueue(*window.input.keyboard.characterQueue, c);
       }
@@ -1414,9 +1407,8 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
       // }
 
       push_context {
-         found, windowIndex := table_find(*glfwWindowToWindow, glfwWindow);
+         found, window := table_find(*glfwWindowToWindow, glfwWindow);
          assert(found);
-         window := Get(*windows, windowIndex);
 
          polledEvent: PolledEvent;
          polledEvent.type = .MouseButton;
@@ -1434,9 +1426,8 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
       // result.input.mouse.position = new Vector2((float)xpos, result.size.y - (float)ypos);
 
       push_context {
-         found, windowIndex := table_find(*glfwWindowToWindow, glfwWindow);
+         found, window := table_find(*glfwWindowToWindow, glfwWindow);
          assert(found);
-         window := Get(*windows, windowIndex);
 
          polledEvent: PolledEvent;
          polledEvent.type = .CursorPosition;
@@ -1451,9 +1442,8 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
       // result.input.mouse.wheel = (float)yoffset;
 
       push_context {
-         found, windowIndex := table_find(*glfwWindowToWindow, glfwWindow);
+         found, window := table_find(*glfwWindowToWindow, glfwWindow);
          assert(found);
-         window := Get(*windows, windowIndex);
 
          polledEvent: PolledEvent;
          polledEvent.type = .Scroll;
@@ -1468,9 +1458,8 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
 
    FramebufferSizeCallback: GLFWframebuffersizefun : (glfwWindow: *GLFWwindow, width: s32, height: s32) #c_call {
       push_context {
-         found, windowIndex := table_find(*glfwWindowToWindow, glfwWindow);
+         found, window := table_find(*glfwWindowToWindow, glfwWindow);
          assert(found);
-         window := Get(*windows, windowIndex);
 
          window.isFramebufferResized = true;
       }
@@ -1480,10 +1469,8 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
    vkResult := glfwCreateWindowSurface(vk.instance, result.window, null, *result.surface);
    assert(vkResult == VK_SUCCESS);
 
-   windowIndex := Add(*windows, result);
-   windowPtr := Get(*windows, windowIndex);
-   table_add(*glfwWindowToWindow, result.window, windowIndex);
-   return windowPtr, windowIndex;
+   table_add(*glfwWindowToWindow, result.window, result);
+   return result;
 }
 
 ChoosePhysicalDevice :: (instance: VkInstance) -> VkPhysicalDevice {
