@@ -6,18 +6,18 @@
 #import "Hash_Table";
 #import "ApilaDispatch";
 
-Maybe :: struct (T: Type) {
-   #as data:      T;
-   isValid:       bool;
+
+MyStruct :: struct {
+   x: int = 69;
+   y: int = 420;
 }
 
 #run {
    set_build_options_dc(.{ do_output = false });
    InitializeThreads();
-   x := 69;
-   // F(cast(Maybe(int)) x);
-}
 
-F :: (m: Maybe(int)) {
-   print("m: %\n", m);
+   ms: MyStruct = .{
+      y = 12,
+   };
+   print("ms: %\n", ms);
 }

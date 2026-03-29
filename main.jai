@@ -9,6 +9,7 @@ Thread :: #import "Thread";
 #import "System";
 #import "ApilaDispatch";
 #import "File";
+#import "stb_image";
 
 #if OS == .LINUX {
    #import "POSIX";
@@ -25,19 +26,25 @@ glfwCreateWindowSurface :: (instance: VkInstance, window: *GLFWwindow, allocator
 // image on gpu
 Image :: struct {
    image:         VkImage;
-   size:          [3] u32;
-   format:        VkFormat;
    view:          VkImageView;   // this image view is the view over the entire image.
                                  // if i need views over individual mip levels for filling the mipmaps
                                  // should i just generate the views on the fly and then destory them.
                                  // idk man. stupid vulkan api. why do we need to create this object but just passing the data as is
                                  // not enough. i have this image view here because for example in swapchain images i need this every frame
-                                 // or a sampled image on shader has one thats being reused a lot.
+                                 //
+                                 // view is only needed for attachments, i think. it is not needed in the descriptor heap
                                  //       - apila, 24/03/26
+   description:   ImageDescription;
+   debugName:     string;
+}
+
+ImageDescription :: struct {
+   size:          [3] u32;
+   format:        VkFormat;
    arrayLayers:   u32;
    mipLevels:     u32;
    sampleCount:   u32;
-   debugName:     string;
+   usage:         VkImageUsageFlags;
 }
 
 // this struct is a lil big in size
@@ -302,6 +309,28 @@ VulkanThings :: struct {
 
    gpuPointerToAllocationInfos:                 Table(u64, AllocationInfo); // storing it in a table so i can free it using the pointer returned by GpuMalloc in GpuFree
    gpuPointerToAllocationInfosMutex:            Thread.Mutex; // i have mutex since GpuMalloc and GpuFree can be accessed from multiple threads
+
+   //
+   // descriptor heaps
+   //
+   // driver reserved ranges start from the end of the user heap!
+   // the xDescriptorHeapSize fields contain the size of the whole heap including the driver reserved range
+   // so the user heap ends at xDescriptorHeapSize - minxHeapReservedRange
+   //
+   imageDescriptorHeap:                         struct { cpu: *void; gpu: u64; };
+   imageDescriptorHeapSize:                     int;
+   imageDescriptorSize:                         int; // this is already aligned size
+   samplerDescriptorHeap:                       struct { cpu: *void; gpu: u64; };
+   samplerDescriptorHeapSize:                   int;
+   samplerDescriptorSize:                       int; // this is already aligned size
+   descriptorHeapProperties:                    VkPhysicalDeviceDescriptorHeapPropertiesEXT;
+
+   // on my machine VkPhysicalDeviceDescriptorHeapPropertiesEXT.minResourceHeapReservedRange is 96768.
+   //
+   // the imageDescriptorSize on my machine is 32.
+   // the aligment is also 32 so it is nice.
+   DESIRED_IMAGE_DESCRIPTOR_COUNT_ON_THE_HEAP :: 169_420; // 1.048.576 is the max on my machine
+   DESIRED_SAMPLER_DESCRIPTOR_COUNT_ON_THE_HEAP :: 32; // 32 is the maximum on my machine
 }
 
 // stores a single VkCommandBuffer and all the command buffers allocated from it
@@ -366,6 +395,18 @@ AllocationInfo :: struct {
    allocation:    VmaAllocation;
 }
 
+SamplerInfo :: struct {
+   magFilter:           VkFilter                = VK_FILTER_LINEAR;
+   minFilter:           VkFilter                = VK_FILTER_LINEAR;
+   mipmapMode:          VkSamplerMipmapMode     = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+   addressModeU:        VkSamplerAddressMode    = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+   addressModeV:        VkSamplerAddressMode    = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+   addressModeW:        VkSamplerAddressMode    = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+   anisotropyEnable:    bool                    = true;
+   maxAnisotropy:       float32                 = 8;
+   borderColor:         VkBorderColor           = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+}
+
 // globals
 vk:                     VulkanThings;
 glfwWindowToWindow:     Table(*GLFWwindow, *Window /* allocated on heap (pointer is stable throughout the lifetime of the window) */);
@@ -398,17 +439,60 @@ main :: () {
 
    pipeline := CreateMeshletPipeline(.{}, meshSpv, fragSpv);
    defer DestroyMeshletPipeline(pipeline);
-   fragmentDataCpu, fragmentDataGpu := GpuMalloc(Vector4, 1);
+   fragmentDataCpu, fragmentDataGpu := GpuMalloc(int, 2);
    defer GpuFree(fragmentDataGpu);
+
+   meshDataCpu, meshDataGpu := GpuMalloc(float, 1);
+   defer GpuFree(meshDataGpu);
+
+   imageWidth: s32;
+   imageHeight: s32;
+   channelCount: s32;
+   imageData := stbi_load("Lenna.png", *imageWidth, *imageHeight, *channelCount, 4);
+   defer stbi_image_free(imageData);
+
+   imageSize := imageWidth * imageHeight * 4;
+   stagingCpu, stagingGpu := GpuMalloc(imageSize, 0);
+   defer GpuFree(stagingGpu);
+   memcpy(stagingCpu, imageData, imageSize);
+
+   lennaDescription: ImageDescription = .{
+      size = .[xx imageWidth, xx imageHeight, 1],
+      format = VK_FORMAT_R8G8B8A8_UNORM,
+      arrayLayers = 1,
+      mipLevels = 1,
+      sampleCount = 1,
+      usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+   };
+   size, alignment := ImageSizeAndAlignment(lennaDescription);
+   _, lennaImageGpu := GpuMalloc(size, alignment, .Gpu);
+   lennaImage := CreateImage(lennaImageGpu, lennaDescription);
+
+   WriteImageDescriptors(0, .[lennaImage]);
+   WriteSamplerDescriptors(0, .[.{}]);
+
+   {
+      uploadCmd := StartCommandRecording();
+      defer Submit(uploadCmd);
+
+      CopyToImage(uploadCmd, stagingGpu, lennaImage);
+      GpuBarrier(uploadCmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+   }
 
    while (!glfwWindowShouldClose(window.window)) {
       AcquireSwapchainImage(window);
       glfwPollEvents();
 
       cmd := StartCommandRecording();
+      ActivateDescriptorHeaps(cmd);
 
       timeSinceStart: float = xx glfwGetTime();
-      fragmentDataCpu[0] = .{ (sin(10 * timeSinceStart) + 1) / 2, (sin(20 * timeSinceStart) + 1) / 2, (sin(30 * timeSinceStart) + 1) / 2, 1 };
+      // fragmentDataCpu[0] = .{ (sin(10 * timeSinceStart) + 1) / 2, (sin(20 * timeSinceStart) + 1) / 2, (sin(30 * timeSinceStart) + 1) / 2, 1 };
+
+      fragmentDataCpu[0] = 0;
+      fragmentDataCpu[1] = 0;
+
+      meshDataCpu[0] = timeSinceStart / 3;
 
       renderPassDescription: RenderPassDescription = .{
          colorTargets = .[
@@ -429,13 +513,63 @@ main :: () {
          defer EndRenderPass(cmd);
 
          BindMeshletPipeline(cmd, pipeline);
-         DispatchMesh(cmd, 0, 0, fragmentDataGpu, 1, 1, 1);
+         DispatchMesh(cmd, 0, meshDataGpu, fragmentDataGpu, 1, 1, 1);
       }
 
       SubmitAndPresent(cmd, window);
 
       reset_temporary_storage();
    }
+}
+
+// generic barrier
+GpuBarrier :: (cmd: *CommandBuffer, before: VkPipelineStageFlagBits2, after: VkPipelineStageFlagBits2) {
+   memoryBarrier: VkMemoryBarrier2 = .{
+      sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      pNext = null,
+      srcStageMask = before,
+      srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+      dstStageMask = after,
+      dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+   };
+
+   dependencyInfo: VkDependencyInfo = .{
+      sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      pNext = null,
+      memoryBarrierCount = 1,
+      pMemoryBarriers = *memoryBarrier,
+   };
+
+   vkCmdPipelineBarrier2(cmd.cmd, *dependencyInfo);
+}
+
+// source is a gpu pointer
+CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image) {
+   Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
+   ok, allocationInfo := table_find(*vk.gpuPointerToAllocationInfos, source);
+   Thread.unlock(*vk.gpuPointerToAllocationInfosMutex);
+
+   assert(ok, "you tried to copy from a gpu pointer that was not allocated by GpuMalloc");
+
+   region: VkBufferImageCopy = .{
+      bufferOffset = 0,
+      bufferRowLength = 0,
+      bufferImageHeight = 0,
+      imageSubresource = .{
+         aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         mipLevel = 0,
+         baseArrayLayer = 0,
+         layerCount = destination.description.arrayLayers,
+      },
+      imageOffset = .{ 0, 0, 0 },
+      imageExtent = .{
+         destination.description.size[0],
+         destination.description.size[1],
+         destination.description.size[2],
+      },
+   };
+
+   vkCmdCopyBufferToImage(cmd.cmd, allocationInfo.buffer, destination.image, VK_IMAGE_LAYOUT_GENERAL, 1, *region);
 }
 
 DispatchMesh :: (cmd: *CommandBuffer, taskDataPointer: u64, meshDataPointer: u64, fragmentDataPointer: u64, x: u32, y: u32, z: u32) {
@@ -479,8 +613,265 @@ BindMeshletPipeline :: (cmd: *CommandBuffer, pipeline: MeshletPipeline) {
    vkCmdBindShadersEXT(cmd.cmd, STAGE_COUNT, stages.data, shaders.data);
 }
 
+ImageDescriptionToVkImageCreateInfo :: (description: ImageDescription) -> VkImageCreateInfo {
+   return .{
+      sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      pNext = null,
+      flags = 0,
+      imageType = VK_IMAGE_TYPE_2D, // i should store the type in ImageDescription if i want to have non 2D images.
+      format = description.format,
+      extent = .{ description.size[0], description.size[1], description.size[2] },
+      mipLevels = description.mipLevels,
+      arrayLayers = description.arrayLayers,
+      samples = xx description.sampleCount,
+      tiling = VK_IMAGE_TILING_OPTIMAL,
+      usage = description.usage,
+      sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      queueFamilyIndexCount = 0,  // ignored since sharingMode is VkSharingMode.Exclusive
+      pQueueFamilyIndices = null, // ignored since sharingMode is VkSharingMode.Exclusive
+      initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+   };
+}
+
+// get the size and aligment requirements for an image thats stored in a buffer of type MemoryType.Gpu.
+// optimal tiling so it is driver dependent and needs to be queried
+ImageSizeAndAlignment :: (description: ImageDescription) -> size: int, alignment: int  {
+   imageCreateInfo := ImageDescriptionToVkImageCreateInfo(description);
+
+   imageMemoryRequirements: VkDeviceImageMemoryRequirements = .{
+      sType = VK_STRUCTURE_TYPE_DEVICE_IMAGE_MEMORY_REQUIREMENTS,
+      pNext = null,
+      pCreateInfo = *imageCreateInfo,
+      planeAspect = 0, // ignored since pCreateInfo->tiling is not VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT, and pCreateInfo->flags has VK_IMAGE_CREATE_DISJOINT_BIT not set
+   };
+
+   memoryRequirements: VkMemoryRequirements2;
+   vkGetDeviceImageMemoryRequirements(vk.device, *imageMemoryRequirements, *memoryRequirements);
+   return xx memoryRequirements.memoryRequirements.size, xx memoryRequirements.memoryRequirements.alignment;
+}
+
+CreateImageViewOverEntireImage :: (image: VkImage, description: ImageDescription) -> VkImageView {
+   imageViewCreateInfo: VkImageViewCreateInfo = .{
+      sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      pNext = null,
+      image = image,
+      viewType = VK_IMAGE_VIEW_TYPE_2D,
+      format = description.format,
+      components = .{
+         r = VK_COMPONENT_SWIZZLE_IDENTITY,
+         g = VK_COMPONENT_SWIZZLE_IDENTITY,
+         b = VK_COMPONENT_SWIZZLE_IDENTITY,
+         a = VK_COMPONENT_SWIZZLE_IDENTITY,
+      },
+      subresourceRange = .{
+         aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, // prolly should store this in ImageDescription
+         baseMipLevel = 0,
+         levelCount = description.mipLevels,
+         baseArrayLayer = 0,
+         layerCount = description.arrayLayers,
+      },
+   };
+
+   outImageView: VkImageView;
+   vkResult := vkCreateImageView(vk.device, *imageViewCreateInfo, null, *outImageView);
+   assert(vkResult == VK_SUCCESS);
+
+   return outImageView;
+}
+
+CreateImage :: (gpuPointer: u64, description: ImageDescription, debugName := "") -> Image {
+   Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
+   ok, allocationInfo := table_find(*vk.gpuPointerToAllocationInfos, gpuPointer);
+   Thread.unlock(*vk.gpuPointerToAllocationInfosMutex);
+
+   assert(ok, "you tried to create an image over a memory that was not allocated with GpuMalloc");
+
+   imageCreateInfo := ImageDescriptionToVkImageCreateInfo(description);
+   outImage: VkImage;
+   vmaCreateAliasingImage2(vk.vmaAllocator, allocationInfo.allocation, 0, *imageCreateInfo, *outImage);
+
+   // idk why i create this here. i guess just for completeness of Image struct
+   imageView := CreateImageViewOverEntireImage(outImage, description);
+
+   // transition layout to general
+   {
+      cmd := StartCommandRecording();
+      defer Submit(cmd);
+
+      barrier: VkImageMemoryBarrier2 = .{
+         sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+         pNext = null,
+         oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+         newLayout = VK_IMAGE_LAYOUT_GENERAL,
+         srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         image = outImage,
+         subresourceRange = .{
+            aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            baseMipLevel = 0,
+            levelCount = description.mipLevels,
+            baseArrayLayer = 0,
+            layerCount = description.arrayLayers
+         },
+         srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+         srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+         dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+         dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+      };
+
+      dependencyInfo: VkDependencyInfo = .{
+         sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+         pNext = null,
+         imageMemoryBarrierCount = 1,
+         pImageMemoryBarriers = *barrier
+      };
+
+      vkCmdPipelineBarrier2(cmd.cmd, *dependencyInfo);
+   }
+
+   return .{
+      image = outImage,
+      description = description,
+      view = imageView,
+      debugName = debugName
+   };
+}
+
+// if you dont call this you cant access to the descriptor heaps in the shaders.
+// i dont do this automatically in StartCommandRecording because the command buffer may not use the descriptor heaps at all and this is often the case.
+// idk how much of an api overhead it is to call this function. considering the convinience we get from this being automatically called in the StartCommandRecording,
+// it might worth the performance penalty of calling this for every command buffer ever recorded. idk tho and didnt create a benchmark so im gonna keep this design for now
+//    - apila, 29/03/26
+ActivateDescriptorHeaps :: (cmd: *CommandBuffer) {
+   imageHeapBindInfo: VkBindHeapInfoEXT = .{
+      sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_EXT,
+      pNext = null,
+      heapRange = .{
+         address = vk.imageDescriptorHeap.gpu,
+         size = xx vk.imageDescriptorHeapSize,
+      },
+      reservedRangeOffset = xx vk.imageDescriptorHeapSize - vk.descriptorHeapProperties.minResourceHeapReservedRange,
+      reservedRangeSize = vk.descriptorHeapProperties.minResourceHeapReservedRange,
+   };
+
+   vkCmdBindResourceHeapEXT(cmd.cmd, *imageHeapBindInfo);
+
+   samplerHeapBindInfo: VkBindHeapInfoEXT = .{
+      sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_EXT,
+      heapRange = .{
+         address = vk.samplerDescriptorHeap.gpu,
+         size = xx vk.samplerDescriptorHeapSize,
+      },
+      reservedRangeOffset = xx vk.samplerDescriptorHeapSize - vk.descriptorHeapProperties.minSamplerHeapReservedRange,
+      reservedRangeSize = vk.descriptorHeapProperties.minSamplerHeapReservedRange,
+   };
+
+   vkCmdBindSamplerHeapEXT(cmd.cmd, *samplerHeapBindInfo);
+}
+
+WriteSamplerDescriptors :: (startIndex: int, descriptors: [] SamplerInfo) {
+   samplerCreateInfos := NewArray(descriptors.count, VkSamplerCreateInfo,, temp);
+   hostAddressRanges := NewArray(descriptors.count, VkHostAddressRangeEXT,, temp);
+
+   for descriptors {
+      samplerCreateInfos[it_index] = .{
+         sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+         pNext = null,
+         flags = 0,
+         magFilter = it.magFilter,
+         minFilter = it.minFilter,
+         mipmapMode = it.mipmapMode,
+         addressModeU = it.addressModeU,
+         addressModeV = it.addressModeV,
+         addressModeW = it.addressModeW,
+         mipLodBias = 0,
+         anisotropyEnable = xx it.anisotropyEnable,
+         maxAnisotropy = max(it.maxAnisotropy, vk.physicalDeviceProperties.limits.maxSamplerAnisotropy),
+         compareEnable = xx false,
+         compareOp = VK_COMPARE_OP_ALWAYS,
+         minLod = 0,
+         maxLod = VK_LOD_CLAMP_NONE, // goes as far as your mipLevels goes
+         borderColor = it.borderColor,
+         unnormalizedCoordinates = xx false,
+      };
+
+      index := startIndex + it_index;
+      hostAddressRanges[it_index] = .{
+         address = vk.samplerDescriptorHeap.cpu.(*u8) + (index * vk.samplerDescriptorSize),
+         size = xx vk.samplerDescriptorSize,
+      };
+   }
+
+   vkResult := vkWriteSamplerDescriptorsEXT(vk.device, xx samplerCreateInfos.count, samplerCreateInfos.data, hostAddressRanges.data);
+   assert(vkResult == VK_SUCCESS);
+}
+
+// sort of the equivalent of:
+//    textureHeap[index] = gpuTextureViewDescriptor(texture, { .format = FORMAT_RGBA8_UNORM });
+// in no graphics api blog post (https://www.sebastianaaltonen.com/blog/no-graphics-api)
+//
+// usage idea in game engine: use StableIndexArray to store your image descriptors
+// so it works out of the box with deleting/adding new images. for example when you load a new scene
+WriteImageDescriptors :: (startIndex: int, descriptors: [] Image) {
+   resourceDescriptorInfos := NewArray(descriptors.count, VkResourceDescriptorInfoEXT,, temp);
+   hostAddressRanges := NewArray(descriptors.count, VkHostAddressRangeEXT,, temp);
+
+   for descriptors {
+      imageViewCreateInfo: VkImageViewCreateInfo = .{
+         sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+         pNext = null,
+         flags = 0,
+         image = it.image,
+         viewType = VK_IMAGE_VIEW_TYPE_2D,
+         format = it.description.format,
+         components = .{
+            r = VK_COMPONENT_SWIZZLE_IDENTITY,
+            g = VK_COMPONENT_SWIZZLE_IDENTITY,
+            b = VK_COMPONENT_SWIZZLE_IDENTITY,
+            a = VK_COMPONENT_SWIZZLE_IDENTITY,
+         },
+         subresourceRange = .{
+            aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            baseMipLevel = 0,
+            levelCount = it.description.mipLevels,
+            baseArrayLayer = 0,
+            layerCount = 1,
+         },
+      };
+
+      imageDescriptorInfo: VkImageDescriptorInfoEXT = .{
+         sType = VK_STRUCTURE_TYPE_IMAGE_DESCRIPTOR_INFO_EXT,
+         pNext = null,
+         pView = *imageViewCreateInfo,
+         layout = VK_IMAGE_LAYOUT_GENERAL,
+      };
+
+      resourceDescriptorInfos[it_index] = .{
+         sType = VK_STRUCTURE_TYPE_RESOURCE_DESCRIPTOR_INFO_EXT,
+         pNext = null,
+         type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+         data = .{ pImage = *imageDescriptorInfo },
+      };
+
+      index := startIndex + it_index;
+      hostAddressRanges[it_index] = .{
+         address = vk.imageDescriptorHeap.cpu.(*u8) + (index * vk.imageDescriptorSize),
+         size = xx vk.imageDescriptorSize,
+      };
+   }
+
+   vkResult := vkWriteResourceDescriptorsEXT(vk.device, xx resourceDescriptorInfos.count, resourceDescriptorInfos.data, hostAddressRanges.data);
+   assert(vkResult == VK_SUCCESS);
+}
+
+Align :: (value: int, alignment: int) -> int {
+   return (value + alignment - 1) & ~(alignment - 1);
+}
+
 GpuMalloc :: ($T: Type, count: int, type: MemoryType = .Default, debugName := "") -> cpu: [] T, gpu: u64 {
-   cpu, gpu := GpuMalloc(size_of(T) * count, type, debugName);
+   // align_of doesnt exists. Code_Struct has an alignment field but idk how to access it from Type
+   //    - apila, 29/03/26
+   cpu, gpu := GpuMalloc(size_of(T) * count, /* align_of(T) */ 0, type, debugName);
 
    array: [] T;
    array.count = count;
@@ -488,8 +879,10 @@ GpuMalloc :: ($T: Type, count: int, type: MemoryType = .Default, debugName := ""
    return array, gpu;
 }
 
-// what about alignment?
-GpuMalloc :: (size: s64, type: MemoryType = .Default, debugName := "") -> cpu: *void, gpu: u64 {
+// vma does auto alignment for idk some stuff but not for descriptor heaps
+// so you better specify the alignment when creating a descriptor heap
+// and also for each descriptor maybe idk.
+GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false) -> cpu: *void, gpu: u64 {
    memoryPropertyFlags: VkMemoryPropertyFlags;
    memoryUsage: VmaMemoryUsage;
 
@@ -518,10 +911,15 @@ GpuMalloc :: (size: s64, type: MemoryType = .Default, debugName := "") -> cpu: *
       sharingMode = VK_SHARING_MODE_EXCLUSIVE, // only one queue family can use this buffer at a time.
    };
 
+   #if (IS_DESCRIPTOR_HEAP) {
+      bufferCreateInfo.usage |= VK_BUFFER_USAGE_DESCRIPTOR_HEAP_BIT_EXT;
+   }
+
    allocationCreateInfo: VmaAllocationCreateInfo = .{
       flags = ifx type == .Gpu then 0 else VmaAllocationCreateFlagBits.MAPPED_BIT.(u32),
       usage = memoryUsage,
       requiredFlags = memoryPropertyFlags,
+      minAlignment = xx alignment,
    };
 
    outBuffer: VkBuffer;
@@ -717,8 +1115,8 @@ BeginRenderPass :: (cmd: *CommandBuffer, description: RenderPassDescription) {
 
    // is this is wrong? if the imageView targets a mip level then what?
    // then i think i need to use the extent of the mip level
-   renderAreaWidth := description.colorTargets[0].image.size[0];
-   renderAreaHeight := description.colorTargets[0].image.size[1];
+   renderAreaWidth := description.colorTargets[0].image.description.size[0];
+   renderAreaHeight := description.colorTargets[0].image.description.size[1];
 
    renderingInfo: VkRenderingInfo = .{
       sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
@@ -749,7 +1147,7 @@ BeginRenderPass :: (cmd: *CommandBuffer, description: RenderPassDescription) {
    }
    vkCmdSetColorWriteMaskEXT(cmd.cmd, 0, xx colorWriteMask.count, colorWriteMask.data);
 
-   rasterizationSamples := description.colorTargets[0].image.sampleCount;
+   rasterizationSamples := description.colorTargets[0].image.description.sampleCount;
    vkCmdSetRasterizationSamplesEXT(cmd.cmd, xx rasterizationSamples);
 
    sampleMask := u32.[U32_MAX, U32_MAX];
@@ -1098,7 +1496,16 @@ InitializeVulkanAndWindow :: () -> *Window {
 
    vk.physicalDevice = ChoosePhysicalDevice(vk.instance);
    physicalDeviceFeatures: VkPhysicalDeviceFeatures;
-   vkGetPhysicalDeviceProperties(vk.physicalDevice, *vk.physicalDeviceProperties);
+
+   vk.descriptorHeapProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT;
+   physicalDeviceProperties2: VkPhysicalDeviceProperties2 = .{
+      sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+      pNext = *vk.descriptorHeapProperties,
+   };
+
+   vkGetPhysicalDeviceProperties2(vk.physicalDevice, *physicalDeviceProperties2);
+   vk.physicalDeviceProperties = physicalDeviceProperties2.properties;
+
    vkGetPhysicalDeviceFeatures(vk.physicalDevice, *physicalDeviceFeatures);
    print("Selected physical device: %\n", to_string(vk.physicalDeviceProperties.deviceName.data));
    print("API version: %\n", VkVersionToString(vk.physicalDeviceProperties.apiVersion,, temp));
@@ -1121,6 +1528,7 @@ InitializeVulkanAndWindow :: () -> *Window {
       to_c_string(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,, temp),
       to_c_string(VK_EXT_SHADER_OBJECT_EXTENSION_NAME,, temp),
       to_c_string(VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,, temp),
+      to_c_string(VK_KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME,, temp),
       // VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME // promoted to core in 1.3
    ];
 
@@ -1183,9 +1591,15 @@ InitializeVulkanAndWindow :: () -> *Window {
       depthClamp = xx true,
    };
 
+   shaderUntypedPointersFeatures: VkPhysicalDeviceShaderUntypedPointersFeaturesKHR = .{
+      sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_UNTYPED_POINTERS_FEATURES_KHR,
+      pNext = null,
+      shaderUntypedPointers = xx true,
+   };
+
    descriptorHeapFeaturesEXT: VkPhysicalDeviceDescriptorHeapFeaturesEXT = .{
       sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT,
-      pNext = null,
+      pNext = *shaderUntypedPointersFeatures,
       descriptorHeap = xx true,
    };
 
@@ -1335,6 +1749,28 @@ InitializeVulkanAndWindow :: () -> *Window {
    CreateSwapchain(window);
 
    Thread.init(*vk.gpuPointerToAllocationInfosMutex);
+
+   {
+      vk.imageDescriptorSize = Align(xx vk.descriptorHeapProperties.imageDescriptorSize, xx vk.descriptorHeapProperties.imageDescriptorAlignment);
+      imageDescriptorCount := min(
+         vk.DESIRED_IMAGE_DESCRIPTOR_COUNT_ON_THE_HEAP,
+         xx vk.descriptorHeapProperties.maxResourceHeapSize / vk.imageDescriptorSize
+      );
+      vk.imageDescriptorHeapSize = imageDescriptorCount * vk.imageDescriptorSize;
+      vk.imageDescriptorHeapSize = Align(vk.imageDescriptorHeapSize, xx vk.descriptorHeapProperties.resourceHeapAlignment);
+      vk.imageDescriptorHeapSize += xx vk.descriptorHeapProperties.minResourceHeapReservedRange;
+      vk.imageDescriptorHeap.cpu, vk.imageDescriptorHeap.gpu = GpuMalloc(vk.imageDescriptorHeapSize, xx vk.descriptorHeapProperties.resourceHeapAlignment, debugName = "image descriptor heap", IS_DESCRIPTOR_HEAP = true);
+
+      vk.samplerDescriptorSize = Align(xx vk.descriptorHeapProperties.samplerDescriptorSize, xx vk.descriptorHeapProperties.samplerDescriptorAlignment);
+      samplerDescriptorCount := min(
+         vk.DESIRED_SAMPLER_DESCRIPTOR_COUNT_ON_THE_HEAP,
+         xx vk.descriptorHeapProperties.maxSamplerHeapSize / vk.samplerDescriptorSize
+      );
+      vk.samplerDescriptorHeapSize = samplerDescriptorCount * samplerDescriptorCount;
+      vk.samplerDescriptorHeapSize = Align(vk.samplerDescriptorHeapSize, xx vk.descriptorHeapProperties.samplerHeapAlignment);
+      vk.samplerDescriptorHeapSize += xx vk.descriptorHeapProperties.minSamplerHeapReservedRange;
+      vk.samplerDescriptorHeap.cpu, vk.samplerDescriptorHeap.gpu = GpuMalloc(vk.samplerDescriptorHeapSize, xx vk.descriptorHeapProperties.samplerHeapAlignment, debugName = "sampler descriptor heap", IS_DESCRIPTOR_HEAP = true);
+   }
 
    return window;
 }
@@ -1563,12 +1999,13 @@ CreateSwapchain :: (window: *Window) {
    window.swapchainImages = NewArray(swapchainImageCount, Image);
    for 0..swapchainImageCount - 1 {
       window.swapchainImages[it].image = swapchainImages[it];
-      window.swapchainImages[it].size = .[swapExtent.width, swapExtent.height, 1];
-      window.swapchainImages[it].format = vk.surfaceFormat.format;
+      window.swapchainImages[it].description.size = .[swapExtent.width, swapExtent.height, 1];
+      window.swapchainImages[it].description.format = vk.surfaceFormat.format;
       window.swapchainImages[it].view = swapchainImageViews[it];
-      window.swapchainImages[it].arrayLayers = 1;
-      window.swapchainImages[it].mipLevels = 1;
-      window.swapchainImages[it].sampleCount = 1;
+      window.swapchainImages[it].description.arrayLayers = 1;
+      window.swapchainImages[it].description.mipLevels = 1;
+      window.swapchainImages[it].description.sampleCount = 1;
+      window.swapchainImages[it].description.usage = swapchainCreateInfo.imageUsage;
       window.swapchainImages[it].debugName = sprint("\"%\" swapchain image(%)", window.title, it);
       VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_IMAGE, xx window.swapchainImages[it].image, window.swapchainImages[it].debugName);
       VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_IMAGE_VIEW, xx window.swapchainImages[it].view, tprint("%[ImageView]", window.swapchainImages[it].debugName));

@@ -2,9 +2,15 @@
 
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_mesh_shader : require
+#extension GL_EXT_descriptor_heap: require
+#extension GL_EXT_nonuniform_qualifier: require
+
+layout(descriptor_heap) uniform sampler     samplerHeap[];
+layout(descriptor_heap) uniform texture2D   imageHeap[];
 
 layout(buffer_reference) buffer FragmentData {
-    vec4 color;
+    int samplerIndex;
+    int imageIndex;
 };
 
 layout(push_constant) uniform PC {
@@ -13,10 +19,11 @@ layout(push_constant) uniform PC {
    FragmentData fragmentData;
 };
 
+layout(location = 0) in vec2 vUv;
 layout(location = 0) out vec4 fragColor;
 
 void ApilaFS() {
-    fragColor = fragmentData.color;
+    fragColor = texture(sampler2D(imageHeap[fragmentData.imageIndex], samplerHeap[fragmentData.samplerIndex]), vUv);
 }
 
 

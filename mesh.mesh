@@ -2,28 +2,39 @@
 
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_mesh_shader : require
+#extension GL_EXT_descriptor_heap: require
 
 layout(buffer_reference) buffer FragmentData {
     vec4 color;
 };
 
+layout(buffer_reference) buffer MeshData {
+    float offset;
+};
+
 layout(push_constant) uniform PC {
    FragmentData taskData; // i put FragmentData but it stands for void* since there is no void*
-   FragmentData meshData; // i put FragmentData but it stands for void* since there is no void*
+   MeshData meshData;
    FragmentData fragmentData;
 };
 
 layout(local_size_x = 1) in;
 layout(triangles, max_vertices = 4, max_primitives = 2) out;
 
+layout(location = 0) out vec2[] uv;
+
 void ApilaMS() {
-   SetMeshOutputsEXT(3, 1);
+   SetMeshOutputsEXT(4, 2);
 
    gl_MeshVerticesEXT[0].gl_Position = vec4(-1, -1, 0.5, 1);
-   gl_MeshVerticesEXT[1].gl_Position = vec4( 0,  0, 0.5, 1);
-   gl_MeshVerticesEXT[2].gl_Position = vec4( 0,  1, 0.5, 1);
-   // gl_MeshVerticesEXT[3].gl_Position = vec4(-1,  1, 0.5, 1);
+   gl_MeshVerticesEXT[1].gl_Position = vec4( 1, -1, 0.5, 1);
+   gl_MeshVerticesEXT[2].gl_Position = vec4( 1,  1, 0.5, 1);
+   gl_MeshVerticesEXT[3].gl_Position = vec4(-1,  1, 0.5, 1);
+   uv[0] = vec2(0, 0 + meshData.offset);
+   uv[1] = vec2(1, 0 + meshData.offset);
+   uv[2] = vec2(1, 1 + meshData.offset);
+   uv[3] = vec2(0, 1 + meshData.offset);
 
    gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
-   // gl_PrimitiveTriangleIndicesEXT[1] = uvec3(0, 2, 3);
+   gl_PrimitiveTriangleIndicesEXT[1] = uvec3(0, 2, 3);
 }
