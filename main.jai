@@ -445,6 +445,8 @@ main :: () {
    meshDataCpu, meshDataGpu := GpuMalloc(float, 1);
    defer GpuFree(meshDataGpu);
 
+   stbi_set_flip_vertically_on_load(xx true);
+
    imageWidth: s32;
    imageHeight: s32;
    channelCount: s32;
@@ -458,7 +460,7 @@ main :: () {
 
    lennaDescription: ImageDescription = .{
       size = .[xx imageWidth, xx imageHeight, 1],
-      format = VK_FORMAT_R8G8B8A8_UNORM,
+      format = VK_FORMAT_R8G8B8A8_SRGB,
       arrayLayers = 1,
       mipLevels = 1,
       sampleCount = 1,
@@ -512,7 +514,7 @@ main :: () {
          BeginRenderPass(cmd, renderPassDescription);
          defer EndRenderPass(cmd);
 
-         BindMeshletPipeline(cmd, pipeline);
+         SetMeshletPipeline(cmd, pipeline);
          DispatchMesh(cmd, 0, meshDataGpu, fragmentDataGpu, 1, 1, 1);
       }
 
@@ -590,7 +592,7 @@ DispatchMesh :: (cmd: *CommandBuffer, taskDataPointer: u64, meshDataPointer: u64
    vkCmdDrawMeshTasksEXT(cmd.cmd, x, y, z);
 }
 
-BindMeshletPipeline :: (cmd: *CommandBuffer, pipeline: MeshletPipeline) {
+SetMeshletPipeline :: (cmd: *CommandBuffer, pipeline: MeshletPipeline) {
    // Validation Error: [ VUID_Undefined ] | MessageID = 0x79de34d4
    // vkCmdDrawMeshTasksEXT(): There is no graphics pipeline bound and vkCmdBindShadersEXT() was not called with stage VK_SHADER_STAGE_VERTEX_BIT and either VK_NULL_HANDLE
    // or a valid VK_SHADER_STAGE_VERTEX_BIT shader (Even if you are using a mesh shader, a VK_NULL_HANDLE must be bound to the vertex stage).
@@ -850,7 +852,7 @@ WriteImageDescriptors :: (startIndex: int, descriptors: [] Image) {
          sType = VK_STRUCTURE_TYPE_RESOURCE_DESCRIPTOR_INFO_EXT,
          pNext = null,
          type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-         data = .{ pImage = *imageDescriptorInfo },
+         data.pImage = *imageDescriptorInfo,
       };
 
       index := startIndex + it_index;
@@ -864,14 +866,19 @@ WriteImageDescriptors :: (startIndex: int, descriptors: [] Image) {
    assert(vkResult == VK_SUCCESS);
 }
 
+alignof :: ($T: Type) -> s64 #expand {
+    return #run -> s64 {
+        info := type_info(struct{ p: u8; t: T; });
+        return info.members[1].offset_in_bytes;
+    };
+}
+
 Align :: (value: int, alignment: int) -> int {
    return (value + alignment - 1) & ~(alignment - 1);
 }
 
 GpuMalloc :: ($T: Type, count: int, type: MemoryType = .Default, debugName := "") -> cpu: [] T, gpu: u64 {
-   // align_of doesnt exists. Code_Struct has an alignment field but idk how to access it from Type
-   //    - apila, 29/03/26
-   cpu, gpu := GpuMalloc(size_of(T) * count, /* align_of(T) */ 0, type, debugName);
+   cpu, gpu := GpuMalloc(size_of(T) * count, alignof(T), type, debugName);
 
    array: [] T;
    array.count = count;
@@ -881,7 +888,6 @@ GpuMalloc :: ($T: Type, count: int, type: MemoryType = .Default, debugName := ""
 
 // vma does auto alignment for idk some stuff but not for descriptor heaps
 // so you better specify the alignment when creating a descriptor heap
-// and also for each descriptor maybe idk.
 GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false) -> cpu: *void, gpu: u64 {
    memoryPropertyFlags: VkMemoryPropertyFlags;
    memoryUsage: VmaMemoryUsage;
@@ -1088,9 +1094,9 @@ BeginRenderPass :: (cmd: *CommandBuffer, description: RenderPassDescription) {
       colorAttachmentInfos[it] = .{
          sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
          pNext = null,
-         clearValue = ifx description.colorTargets[it].hasClearValue then .{
-            color = Vector4ToVkClearColorValue(description.colorTargets[it].clearValue.color),
-         } else VkClearValue.{ color = .{ float32_ = .[1, 0, 1, 1] } },
+         // clearValue = ifx description.colorTargets[it].hasClearValue then .{
+         //    color = Vector4ToVkClearColorValue(description.colorTargets[it].clearValue.color),
+         // } else VkClearValue.{ color = .{ float32_ = .[1, 0, 1, 1] } },
          loadOp = ifx description.colorTargets[it].hasClearValue then VK_ATTACHMENT_LOAD_OP_CLEAR else VK_ATTACHMENT_LOAD_OP_LOAD,
          storeOp = VK_ATTACHMENT_STORE_OP_STORE,
          imageLayout = VK_IMAGE_LAYOUT_GENERAL,
@@ -1099,19 +1105,32 @@ BeginRenderPass :: (cmd: *CommandBuffer, description: RenderPassDescription) {
          resolveImageLayout = ifx description.colorTargets[it].resolveImageView != null then VK_IMAGE_LAYOUT_GENERAL else 0,
          resolveImageView = description.colorTargets[it].resolveImageView,
       };
+
+      // untagged union update :(
+      if (description.colorTargets[it].hasClearValue) {
+         colorAttachmentInfos[it].clearValue.color = Vector4ToVkClearColorValue(description.colorTargets[it].clearValue.color);
+      } else {
+         colorAttachmentInfos[it].clearValue.color.float32_ = .[1, 0, 1, 1];
+      }
    }
 
    depthAttachmentInfo: VkRenderingAttachmentInfo = .{
       sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
       pNext = null,
-      clearValue = ifx description.depthTarget.hasClearValue then .{
-         depthStencil = .{ description.depthTarget.clearValue.depth, description.depthTarget.clearValue.stencil }
-      } else VkClearValue.{ depthStencil = .{ 1, 0 } } ,
+      clearValue.depthStencil = ifx description.depthTarget.hasClearValue then
+                                    VkClearDepthStencilValue.{ description.depthTarget.clearValue.depth, description.depthTarget.clearValue.stencil }
+                                else VkClearDepthStencilValue.{ 1, 0 },
       loadOp = ifx description.depthTarget.hasClearValue then VK_ATTACHMENT_LOAD_OP_CLEAR else VK_ATTACHMENT_LOAD_OP_LOAD,
       storeOp = VK_ATTACHMENT_STORE_OP_STORE,
       imageLayout = VK_IMAGE_LAYOUT_GENERAL,
       imageView = ifx description.hasDepthTarget then GetImageViewFromRenderPassAttachmentInfo(description.depthTarget) else null,
    };
+
+   if (description.depthTarget.hasClearValue) {
+      depthAttachmentInfo.clearValue.depthStencil = .{ description.depthTarget.clearValue.depth, description.depthTarget.clearValue.stencil };
+   } else {
+      depthAttachmentInfo.clearValue.depthStencil = .{ 1, 0 };
+   }
 
    // is this is wrong? if the imageView targets a mip level then what?
    // then i think i need to use the extent of the mip level
@@ -1642,6 +1661,7 @@ InitializeVulkanAndWindow :: () -> *Window {
       storageBuffer8BitAccess = xx true,
       timelineSemaphore = xx true,
       bufferDeviceAddress = xx true,
+      scalarBlockLayout = xx true,
    };
 
    deviceCreateInfo: VkDeviceCreateInfo = .{

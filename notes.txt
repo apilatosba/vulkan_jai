@@ -1,0 +1,11 @@
+missing functionality from the no graphics api blog post:
+   gpuMemCpy
+   gpuCopyFromTexture
+
+   // are these two possible in vulkan 1.4?
+   gpuSignalAfter
+   gpuWaitBefore
+
+   gpuDrawMeshletsIndirect // indirect
+
+i want to try to implement jai to spirv compiler next

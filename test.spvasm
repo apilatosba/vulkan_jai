@@ -1,0 +1,163 @@
+; SPIR-V
+; Version: 1.6
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 90
+; Schema: 0
+               OpCapability MeshShadingEXT
+               OpCapability PhysicalStorageBufferAddresses
+               OpExtension "SPV_EXT_mesh_shader"
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel PhysicalStorageBuffer64 GLSL450
+               OpEntryPoint MeshEXT %main "main" %gl_MeshVerticesEXT %uv %_ %gl_PrimitiveTriangleIndicesEXT
+               OpExecutionModeId %main LocalSizeId %uint_1 %uint_1 %uint_1
+               OpExecutionMode %main OutputVertices 40
+               OpExecutionMode %main OutputPrimitivesEXT 2
+               OpExecutionMode %main OutputTrianglesEXT
+
+               ; ; Debug Information
+               ; OpSource GLSL 460
+               ; OpSourceExtension "GL_EXT_buffer_reference"
+               ; OpSourceExtension "GL_EXT_descriptor_heap"
+               ; OpSourceExtension "GL_EXT_mesh_shader"
+               ; OpName %main "main"                  ; id %4
+               ; OpName %gl_MeshPerVertexEXT "gl_MeshPerVertexEXT"    ; id %13
+               ; OpMemberName %gl_MeshPerVertexEXT 0 "gl_Position"
+               ; OpMemberName %gl_MeshPerVertexEXT 1 "gl_PointSize"
+               ; OpMemberName %gl_MeshPerVertexEXT 2 "gl_ClipDistance"
+               ; OpMemberName %gl_MeshPerVertexEXT 3 "gl_CullDistance"
+               ; OpName %gl_MeshVerticesEXT "gl_MeshVerticesEXT"  ; id %17
+               ; OpName %uv "uv"                                  ; id %38
+               ; OpName %PC "PC"                                  ; id %42
+               ; OpMemberName %PC 0 "taskData"
+               ; OpMemberName %PC 1 "meshData"
+               ; OpMemberName %PC 2 "fragmentData"
+               ; OpName %FragmentData "FragmentData"  ; id %43
+               ; OpMemberName %FragmentData 0 "color"
+               ; OpName %MeshData "MeshData"          ; id %44
+               ; OpMemberName %MeshData 0 "offset"
+               ; OpName %_ ""                         ; id %46
+               ; OpName %gl_PrimitiveTriangleIndicesEXT "gl_PrimitiveTriangleIndicesEXT"  ; id %81
+
+               ; Annotations
+               OpDecorate %gl_MeshPerVertexEXT Block
+               OpMemberDecorate %gl_MeshPerVertexEXT 0 BuiltIn Position
+               OpMemberDecorate %gl_MeshPerVertexEXT 1 BuiltIn PointSize
+               ; OpMemberDecorate %gl_MeshPerVertexEXT 2 BuiltIn ClipDistance
+               ; OpMemberDecorate %gl_MeshPerVertexEXT 3 BuiltIn CullDistance
+               OpDecorate %uv Location 0
+               OpDecorate %PC Block
+               OpMemberDecorate %PC 0 Offset 0
+               OpMemberDecorate %PC 1 Offset 8
+               OpMemberDecorate %PC 2 Offset 16
+               OpDecorate %FragmentData Block
+               OpMemberDecorate %FragmentData 0 Offset 0
+               OpDecorate %MeshData Block
+               OpMemberDecorate %MeshData 0 Offset 0
+               OpDecorate %gl_PrimitiveTriangleIndicesEXT BuiltIn PrimitiveTriangleIndicesEXT
+
+               ; Types, variables and constants
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+     %uint_1 = OpConstant %uint 1
+     %uint_4 = OpConstant %uint 4
+     %uint_2 = OpConstant %uint 2
+      %float = OpTypeFloat 32
+    %v4float = OpTypeVector %float 4
+%_arr_float_uint_1 = OpTypeArray %float %uint_1
+%gl_MeshPerVertexEXT = OpTypeStruct %v4float %float ; %_arr_float_uint_1 %_arr_float_uint_1   ; Block
+    %uint_40 = OpConstant %uint 40
+%_arr_gl_MeshPerVertexEXT_uint_40 = OpTypeArray %gl_MeshPerVertexEXT %uint_40
+%_ptr_Output__arr_gl_MeshPerVertexEXT_uint_40 = OpTypePointer Output %_arr_gl_MeshPerVertexEXT_uint_40
+%gl_MeshVerticesEXT = OpVariable %_ptr_Output__arr_gl_MeshPerVertexEXT_uint_40 Output
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+   %float_n1 = OpConstant %float -1
+  %float_0_5 = OpConstant %float 0.5
+    %float_1 = OpConstant %float 1
+         %23 = OpConstantComposite %v4float %float_n1 %float_n1 %float_0_5 %float_1
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+      %int_1 = OpConstant %int 1
+         %27 = OpConstantComposite %v4float %float_1 %float_n1 %float_0_5 %float_1
+      %int_2 = OpConstant %int 2
+         %30 = OpConstantComposite %v4float %float_1 %float_1 %float_0_5 %float_1
+      %int_3 = OpConstant %int 3
+         %33 = OpConstantComposite %v4float %float_n1 %float_1 %float_0_5 %float_1
+    %v2float = OpTypeVector %float 2
+%_arr_v2float_uint_40 = OpTypeArray %v2float %uint_40
+%_ptr_Output__arr_v2float_uint_40 = OpTypePointer Output %_arr_v2float_uint_40
+         %uv = OpVariable %_ptr_Output__arr_v2float_uint_40 Output  ; Location 0
+    %float_0 = OpConstant %float 0
+               OpTypeForwardPointer %_ptr_PhysicalStorageBuffer_FragmentData PhysicalStorageBuffer
+               OpTypeForwardPointer %_ptr_PhysicalStorageBuffer_MeshData PhysicalStorageBuffer
+         %PC = OpTypeStruct %_ptr_PhysicalStorageBuffer_FragmentData %_ptr_PhysicalStorageBuffer_MeshData %_ptr_PhysicalStorageBuffer_FragmentData  ; Block
+%FragmentData = OpTypeStruct %v4float                                                                                                               ; Block
+%_ptr_PhysicalStorageBuffer_FragmentData = OpTypePointer PhysicalStorageBuffer %FragmentData
+   %MeshData = OpTypeStruct %float                  ; Block
+%_ptr_PhysicalStorageBuffer_MeshData = OpTypePointer PhysicalStorageBuffer %MeshData
+%_ptr_PushConstant_PC = OpTypePointer PushConstant %PC
+          %_ = OpVariable %_ptr_PushConstant_PC PushConstant
+%_ptr_PushConstant__ptr_PhysicalStorageBuffer_MeshData = OpTypePointer PushConstant %_ptr_PhysicalStorageBuffer_MeshData
+%_ptr_PhysicalStorageBuffer_float = OpTypePointer PhysicalStorageBuffer %float
+%_ptr_Output_v2float = OpTypePointer Output %v2float
+     %v3uint = OpTypeVector %uint 3
+%_arr_v3uint_uint_2 = OpTypeArray %v3uint %uint_2
+%_ptr_Output__arr_v3uint_uint_2 = OpTypePointer Output %_arr_v3uint_uint_2
+%gl_PrimitiveTriangleIndicesEXT = OpVariable %_ptr_Output__arr_v3uint_uint_2 Output     ; BuiltIn PrimitiveTriangleIndicesEXT
+     %uint_0 = OpConstant %uint 0
+         %83 = OpConstantComposite %v3uint %uint_0 %uint_1 %uint_2
+%_ptr_Output_v3uint = OpTypePointer Output %v3uint
+     %uint_3 = OpConstant %uint 3
+         %87 = OpConstantComposite %v3uint %uint_0 %uint_2 %uint_3
+         %89 = OpConstantComposite %v3uint %uint_1 %uint_1 %uint_1
+
+               ; Function main
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+               OpSetMeshOutputsEXT %uint_4 %uint_2
+         %25 = OpAccessChain %_ptr_Output_v4float %gl_MeshVerticesEXT %int_0 %int_0
+               OpStore %25 %23
+         %28 = OpAccessChain %_ptr_Output_v4float %gl_MeshVerticesEXT %int_1 %int_0
+               OpStore %28 %27
+         %31 = OpAccessChain %_ptr_Output_v4float %gl_MeshVerticesEXT %int_2 %int_0
+               OpStore %31 %30
+         %34 = OpAccessChain %_ptr_Output_v4float %gl_MeshVerticesEXT %int_3 %int_0
+               OpStore %34 %33
+         %48 = OpAccessChain %_ptr_PushConstant__ptr_PhysicalStorageBuffer_MeshData %_ %int_1
+         %49 = OpLoad %_ptr_PhysicalStorageBuffer_MeshData %48
+         %51 = OpAccessChain %_ptr_PhysicalStorageBuffer_float %49 %int_0
+         %52 = OpLoad %float %51 Aligned 16
+         %53 = OpFAdd %float %float_0 %52
+         %54 = OpCompositeConstruct %v2float %float_0 %53
+         %56 = OpAccessChain %_ptr_Output_v2float %uv %int_0
+               OpStore %56 %54
+         %57 = OpAccessChain %_ptr_PushConstant__ptr_PhysicalStorageBuffer_MeshData %_ %int_1
+         %58 = OpLoad %_ptr_PhysicalStorageBuffer_MeshData %57
+         %59 = OpAccessChain %_ptr_PhysicalStorageBuffer_float %58 %int_0
+         %60 = OpLoad %float %59 Aligned 16
+         %61 = OpFAdd %float %float_0 %60
+         %62 = OpCompositeConstruct %v2float %float_1 %61
+         %63 = OpAccessChain %_ptr_Output_v2float %uv %int_1
+               OpStore %63 %62
+         %64 = OpAccessChain %_ptr_PushConstant__ptr_PhysicalStorageBuffer_MeshData %_ %int_1
+         %65 = OpLoad %_ptr_PhysicalStorageBuffer_MeshData %64
+         %66 = OpAccessChain %_ptr_PhysicalStorageBuffer_float %65 %int_0
+         %67 = OpLoad %float %66 Aligned 16
+         %68 = OpFAdd %float %float_1 %67
+         %69 = OpCompositeConstruct %v2float %float_1 %68
+         %70 = OpAccessChain %_ptr_Output_v2float %uv %int_2
+               OpStore %70 %69
+         %71 = OpAccessChain %_ptr_PushConstant__ptr_PhysicalStorageBuffer_MeshData %_ %int_1
+         %72 = OpLoad %_ptr_PhysicalStorageBuffer_MeshData %71
+         %73 = OpAccessChain %_ptr_PhysicalStorageBuffer_float %72 %int_0
+         %74 = OpLoad %float %73 Aligned 16
+         %75 = OpFAdd %float %float_1 %74
+         %76 = OpCompositeConstruct %v2float %float_0 %75
+         %77 = OpAccessChain %_ptr_Output_v2float %uv %int_3
+               OpStore %77 %76
+         %85 = OpAccessChain %_ptr_Output_v3uint %gl_PrimitiveTriangleIndicesEXT %int_0
+               OpStore %85 %83
+         %88 = OpAccessChain %_ptr_Output_v3uint %gl_PrimitiveTriangleIndicesEXT %int_1
+               OpStore %88 %87
+               OpReturn
+               OpFunctionEnd
