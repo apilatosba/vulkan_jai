@@ -10,6 +10,7 @@ Thread :: #import "Thread";
 #import "ApilaDispatch";
 #import "File";
 #import "stb_image";
+#import "ApilaSpirv";
 
 #if OS == .LINUX {
    #import "POSIX";
@@ -421,23 +422,47 @@ glfwWindowToWindow:     Table(*GLFWwindow, *Window /* allocated on heap (pointer
 // idk maybe it is my pc (driver or x11 or the combination of both)
 //
 
+MeshOutVertex :: struct {
+   uv: f32x2;
+}
+MeshOutPrimitive :: struct { }
+MeshData :: struct {
+   offset: float;
+}
+FragmentData :: struct {
+   imageIndex:    s32;
+   samplerIndex:  s32;
+}
+
+MeshShader :: (mOutVertex: [] MeshOutVertex, mOutPrimitive: [] MeshOutPrimitive, data: *MeshData) {
+   SetMeshOutputs(4, 2);
+
+   meshvertices[0].position = .{ -1, -1, 0.5, 1 };
+   meshvertices[1].position = .{  1, -1, 0.5, 1 };
+   meshvertices[2].position = .{  1,  1, 0.5, 1 };
+   meshvertices[3].position = .{ -1,  1, 0.5, 1 };
+
+   mOutVertex[0].uv = .{ 0, 0 + data.offset };
+   mOutVertex[1].uv = .{ 1, 0 + data.offset };
+   mOutVertex[2].uv = .{ 1, 1 + data.offset };
+   mOutVertex[3].uv = .{ 0, 1 + data.offset };
+
+   meshtriangles[0] = .{ 0, 1, 2 };
+   meshtriangles[1] = .{ 0, 2, 3 };
+} @1_1_1 @4_2 @triangles
+
+FragmentShader :: (mOutVertex: MeshOutVertex, mOutPrimitive: MeshOutPrimitive, data: *FragmentData) -> f32x4 {
+   return texture(images[data.imageIndex], samplers[data.samplerIndex], mOutVertex.uv);
+}
+
+APILA_MESH_SPV :: #run CompileToSpirv(code_of(MeshShader), .Mesh);
+APILA_FRAGMENT_SPV :: #run CompileToSpirv(code_of(FragmentShader), .Fragment);
+
 main :: () {
    InitializeThreads();
    window := InitializeVulkanAndWindow();
 
-   meshSpvString := read_entire_file("mesh.spv");
-   fragSpvString := read_entire_file("frag.spv");
-   meshSpv: [] u8 = .{
-      count = meshSpvString.count,
-      data = meshSpvString.data
-   };
-
-   fragSpv: [] u8 = .{
-      count = fragSpvString.count,
-      data = fragSpvString.data
-   };
-
-   pipeline := CreateMeshletPipeline(.{}, meshSpv, fragSpv);
+   pipeline := CreateMeshletPipeline(.{}, APILA_MESH_SPV, APILA_FRAGMENT_SPV);
    defer DestroyMeshletPipeline(pipeline);
    fragmentDataCpu, fragmentDataGpu := GpuMalloc(int, 2);
    defer GpuFree(fragmentDataGpu);
@@ -1608,6 +1633,7 @@ InitializeVulkanAndWindow :: () -> *Window {
       fillModeNonSolid = xx true,
       samplerAnisotropy = xx true,
       depthClamp = xx true,
+      shaderInt64 = xx true,
    };
 
    shaderUntypedPointersFeatures: VkPhysicalDeviceShaderUntypedPointersFeaturesKHR = .{

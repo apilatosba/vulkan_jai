@@ -48,4 +48,5 @@ OUTPUT_EXE_NAME   :: "main";
 
    // copy sos
    copy_file("modules/Vulkan_Memory_Allocator/linux/libvma.so", tprint("%/libvma.so", BUILD_FOLDER));
+   copy_file("modules/SpirvTools/linux/libSPIRV-Tools-shared.so", tprint("%/libSPIRV-Tools-shared.so", BUILD_FOLDER));
 }
