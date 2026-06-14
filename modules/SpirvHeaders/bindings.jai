@@ -5230,6 +5230,203 @@ SpvOp_ :: enum u32 {
 
 SpvOp :: SpvOp_;
 
+GLSLstd450Version: s32 : 100;
+GLSLstd450Revision: s32 : 3;
+
+GLSLstd450 :: enum u32 {
+    Bad                   :: 0;
+
+    Round                 :: 1;
+    RoundEven             :: 2;
+    Trunc                 :: 3;
+    FAbs                  :: 4;
+    SAbs                  :: 5;
+    FSign                 :: 6;
+    SSign                 :: 7;
+    Floor                 :: 8;
+    Ceil                  :: 9;
+    Fract                 :: 10;
+
+    Radians               :: 11;
+    Degrees               :: 12;
+    Sin                   :: 13;
+    Cos                   :: 14;
+    Tan                   :: 15;
+    Asin                  :: 16;
+    Acos                  :: 17;
+    Atan                  :: 18;
+    Sinh                  :: 19;
+    Cosh                  :: 20;
+    Tanh                  :: 21;
+    Asinh                 :: 22;
+    Acosh                 :: 23;
+    Atanh                 :: 24;
+    Atan2                 :: 25;
+
+    Pow                   :: 26;
+    Exp                   :: 27;
+    Log                   :: 28;
+    Exp2                  :: 29;
+    Log2                  :: 30;
+    Sqrt                  :: 31;
+    InverseSqrt           :: 32;
+
+    Determinant           :: 33;
+    MatrixInverse         :: 34;
+
+    Modf                  :: 35;
+    ModfStruct            :: 36;
+    FMin                  :: 37;
+    UMin                  :: 38;
+    SMin                  :: 39;
+    FMax                  :: 40;
+    UMax                  :: 41;
+    SMax                  :: 42;
+    FClamp                :: 43;
+    UClamp                :: 44;
+    SClamp                :: 45;
+    FMix                  :: 46;
+    IMix                  :: 47;
+    Step                  :: 48;
+    SmoothStep            :: 49;
+
+    Fma                   :: 50;
+    Frexp                 :: 51;
+    FrexpStruct           :: 52;
+    Ldexp                 :: 53;
+
+    PackSnorm4x8          :: 54;
+    PackUnorm4x8          :: 55;
+    PackSnorm2x16         :: 56;
+    PackUnorm2x16         :: 57;
+    PackHalf2x16          :: 58;
+    PackDouble2x32        :: 59;
+    UnpackSnorm2x16       :: 60;
+    UnpackUnorm2x16       :: 61;
+    UnpackHalf2x16        :: 62;
+    UnpackSnorm4x8        :: 63;
+    UnpackUnorm4x8        :: 64;
+    UnpackDouble2x32      :: 65;
+
+    Length                :: 66;
+    Distance              :: 67;
+    Cross                 :: 68;
+    Normalize             :: 69;
+    FaceForward           :: 70;
+    Reflect               :: 71;
+    Refract               :: 72;
+
+    FindILsb              :: 73;
+    FindSMsb              :: 74;
+    FindUMsb              :: 75;
+
+    InterpolateAtCentroid :: 76;
+    InterpolateAtSample   :: 77;
+    InterpolateAtOffset   :: 78;
+
+    NMin                  :: 79;
+    NMax                  :: 80;
+    NClamp                :: 81;
+
+    Count                 :: 82;
+
+    GLSLstd450Bad                   :: Bad;
+
+    GLSLstd450Round                 :: Round;
+    GLSLstd450RoundEven             :: RoundEven;
+    GLSLstd450Trunc                 :: Trunc;
+    GLSLstd450FAbs                  :: FAbs;
+    GLSLstd450SAbs                  :: SAbs;
+    GLSLstd450FSign                 :: FSign;
+    GLSLstd450SSign                 :: SSign;
+    GLSLstd450Floor                 :: Floor;
+    GLSLstd450Ceil                  :: Ceil;
+    GLSLstd450Fract                 :: Fract;
+
+    GLSLstd450Radians               :: Radians;
+    GLSLstd450Degrees               :: Degrees;
+    GLSLstd450Sin                   :: Sin;
+    GLSLstd450Cos                   :: Cos;
+    GLSLstd450Tan                   :: Tan;
+    GLSLstd450Asin                  :: Asin;
+    GLSLstd450Acos                  :: Acos;
+    GLSLstd450Atan                  :: Atan;
+    GLSLstd450Sinh                  :: Sinh;
+    GLSLstd450Cosh                  :: Cosh;
+    GLSLstd450Tanh                  :: Tanh;
+    GLSLstd450Asinh                 :: Asinh;
+    GLSLstd450Acosh                 :: Acosh;
+    GLSLstd450Atanh                 :: Atanh;
+    GLSLstd450Atan2                 :: Atan2;
+
+    GLSLstd450Pow                   :: Pow;
+    GLSLstd450Exp                   :: Exp;
+    GLSLstd450Log                   :: Log;
+    GLSLstd450Exp2                  :: Exp2;
+    GLSLstd450Log2                  :: Log2;
+    GLSLstd450Sqrt                  :: Sqrt;
+    GLSLstd450InverseSqrt           :: InverseSqrt;
+
+    GLSLstd450Determinant           :: Determinant;
+    GLSLstd450MatrixInverse         :: MatrixInverse;
+
+    GLSLstd450Modf                  :: Modf;
+    GLSLstd450ModfStruct            :: ModfStruct;
+    GLSLstd450FMin                  :: FMin;
+    GLSLstd450UMin                  :: UMin;
+    GLSLstd450SMin                  :: SMin;
+    GLSLstd450FMax                  :: FMax;
+    GLSLstd450UMax                  :: UMax;
+    GLSLstd450SMax                  :: SMax;
+    GLSLstd450FClamp                :: FClamp;
+    GLSLstd450UClamp                :: UClamp;
+    GLSLstd450SClamp                :: SClamp;
+    GLSLstd450FMix                  :: FMix;
+    GLSLstd450IMix                  :: IMix;
+    GLSLstd450Step                  :: Step;
+    GLSLstd450SmoothStep            :: SmoothStep;
+
+    GLSLstd450Fma                   :: Fma;
+    GLSLstd450Frexp                 :: Frexp;
+    GLSLstd450FrexpStruct           :: FrexpStruct;
+    GLSLstd450Ldexp                 :: Ldexp;
+
+    GLSLstd450PackSnorm4x8          :: PackSnorm4x8;
+    GLSLstd450PackUnorm4x8          :: PackUnorm4x8;
+    GLSLstd450PackSnorm2x16         :: PackSnorm2x16;
+    GLSLstd450PackUnorm2x16         :: PackUnorm2x16;
+    GLSLstd450PackHalf2x16          :: PackHalf2x16;
+    GLSLstd450PackDouble2x32        :: PackDouble2x32;
+    GLSLstd450UnpackSnorm2x16       :: UnpackSnorm2x16;
+    GLSLstd450UnpackUnorm2x16       :: UnpackUnorm2x16;
+    GLSLstd450UnpackHalf2x16        :: UnpackHalf2x16;
+    GLSLstd450UnpackSnorm4x8        :: UnpackSnorm4x8;
+    GLSLstd450UnpackUnorm4x8        :: UnpackUnorm4x8;
+    GLSLstd450UnpackDouble2x32      :: UnpackDouble2x32;
+
+    GLSLstd450Length                :: Length;
+    GLSLstd450Distance              :: Distance;
+    GLSLstd450Cross                 :: Cross;
+    GLSLstd450Normalize             :: Normalize;
+    GLSLstd450FaceForward           :: FaceForward;
+    GLSLstd450Reflect               :: Reflect;
+    GLSLstd450Refract               :: Refract;
+
+    GLSLstd450FindILsb              :: FindILsb;
+    GLSLstd450FindSMsb              :: FindSMsb;
+    GLSLstd450FindUMsb              :: FindUMsb;
+
+    GLSLstd450InterpolateAtCentroid :: InterpolateAtCentroid;
+    GLSLstd450InterpolateAtSample   :: InterpolateAtSample;
+    GLSLstd450InterpolateAtOffset   :: InterpolateAtOffset;
+
+    GLSLstd450NMin                  :: NMin;
+    GLSLstd450NMax                  :: NMax;
+    GLSLstd450NClamp                :: NClamp;
+
+    GLSLstd450Count                 :: Count;
+}
+
 #scope_file
 
 spirv_headers :: #library "./spirv_headers";

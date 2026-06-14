@@ -2,15 +2,12 @@
 #import "Basic";
 #import "glfw";
 #import "Math";
-#import "StableIndexArray";
 #import "Hash_Table";
 #import "Queue";
 Thread :: #import "Thread";
 #import "System";
 #import "ApilaDispatch";
 #import "File";
-#import "stb_image";
-#import "ApilaSpirv";
 
 #if OS == .LINUX {
    #import "POSIX";
@@ -421,133 +418,6 @@ glfwWindowToWindow:     Table(*GLFWwindow, *Window /* allocated on heap (pointer
 // i checked the bgfx examples and the behaviour is the exact same as mine
 // idk maybe it is my pc (driver or x11 or the combination of both)
 //
-
-MeshOutVertex :: struct {
-   uv: f32x2;
-}
-MeshOutPrimitive :: struct { }
-MeshData :: struct {
-   offset: float;
-}
-FragmentData :: struct {
-   imageIndex:    s32;
-   samplerIndex:  s32;
-}
-
-MeshShader :: (mOutVertex: [] MeshOutVertex, mOutPrimitive: [] MeshOutPrimitive, data: *MeshData) {
-   SetMeshOutputs(4, 2);
-
-   meshvertices[0].position = .{ -1, -1, 0.5, 1 };
-   meshvertices[1].position = .{  1, -1, 0.5, 1 };
-   meshvertices[2].position = .{  1,  1, 0.5, 1 };
-   meshvertices[3].position = .{ -1,  1, 0.5, 1 };
-
-   mOutVertex[0].uv = .{ 0, 0 + data.offset };
-   mOutVertex[1].uv = .{ 1, 0 + data.offset };
-   mOutVertex[2].uv = .{ 1, 1 + data.offset };
-   mOutVertex[3].uv = .{ 0, 1 + data.offset };
-
-   meshtriangles[0] = .{ 0, 1, 2 };
-   meshtriangles[1] = .{ 0, 2, 3 };
-} @1_1_1 @4_2 @triangles
-
-FragmentShader :: (mOutVertex: MeshOutVertex, mOutPrimitive: MeshOutPrimitive, data: *FragmentData) -> f32x4 {
-   return texture(images[data.imageIndex], samplers[data.samplerIndex], mOutVertex.uv);
-}
-
-APILA_MESH_SPV :: #run CompileToSpirv(code_of(MeshShader), .Mesh);
-APILA_FRAGMENT_SPV :: #run CompileToSpirv(code_of(FragmentShader), .Fragment);
-
-main :: () {
-   InitializeThreads();
-   window := InitializeVulkanAndWindow();
-
-   pipeline := CreateMeshletPipeline(.{}, APILA_MESH_SPV, APILA_FRAGMENT_SPV);
-   defer DestroyMeshletPipeline(pipeline);
-   fragmentDataCpu, fragmentDataGpu := GpuMalloc(int, 2);
-   defer GpuFree(fragmentDataGpu);
-
-   meshDataCpu, meshDataGpu := GpuMalloc(float, 1);
-   defer GpuFree(meshDataGpu);
-
-   stbi_set_flip_vertically_on_load(xx true);
-
-   imageWidth: s32;
-   imageHeight: s32;
-   channelCount: s32;
-   imageData := stbi_load("Lenna.png", *imageWidth, *imageHeight, *channelCount, 4);
-   defer stbi_image_free(imageData);
-
-   imageSize := imageWidth * imageHeight * 4;
-   stagingCpu, stagingGpu := GpuMalloc(imageSize, 0);
-   defer GpuFree(stagingGpu);
-   memcpy(stagingCpu, imageData, imageSize);
-
-   lennaDescription: ImageDescription = .{
-      size = .[xx imageWidth, xx imageHeight, 1],
-      format = VK_FORMAT_R8G8B8A8_SRGB,
-      arrayLayers = 1,
-      mipLevels = 1,
-      sampleCount = 1,
-      usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-   };
-   size, alignment := ImageSizeAndAlignment(lennaDescription);
-   _, lennaImageGpu := GpuMalloc(size, alignment, .Gpu);
-   lennaImage := CreateImage(lennaImageGpu, lennaDescription);
-
-   WriteImageDescriptors(0, .[lennaImage]);
-   WriteSamplerDescriptors(0, .[.{}]);
-
-   {
-      uploadCmd := StartCommandRecording();
-      defer Submit(uploadCmd);
-
-      CopyToImage(uploadCmd, stagingGpu, lennaImage);
-      GpuBarrier(uploadCmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
-   }
-
-   while (!glfwWindowShouldClose(window.window)) {
-      AcquireSwapchainImage(window);
-      glfwPollEvents();
-
-      cmd := StartCommandRecording();
-      ActivateDescriptorHeaps(cmd);
-
-      timeSinceStart: float = xx glfwGetTime();
-      // fragmentDataCpu[0] = .{ (sin(10 * timeSinceStart) + 1) / 2, (sin(20 * timeSinceStart) + 1) / 2, (sin(30 * timeSinceStart) + 1) / 2, 1 };
-
-      fragmentDataCpu[0] = 0;
-      fragmentDataCpu[1] = 0;
-
-      meshDataCpu[0] = timeSinceStart / 3;
-
-      renderPassDescription: RenderPassDescription = .{
-         colorTargets = .[
-            .{
-               image = *window.swapchainImages[window.swapchainImageIndex],
-               hasClearValue = true,
-               clearValue = .{
-                  color = .{ 1, 0, 1, 1 }
-               },
-            },
-         ],
-         hasDepthTarget = false,
-         hasStencilTarget = false,
-      };
-
-      {
-         BeginRenderPass(cmd, renderPassDescription);
-         defer EndRenderPass(cmd);
-
-         SetMeshletPipeline(cmd, pipeline);
-         DispatchMesh(cmd, 0, meshDataGpu, fragmentDataGpu, 1, 1, 1);
-      }
-
-      SubmitAndPresent(cmd, window);
-
-      reset_temporary_storage();
-   }
-}
 
 // generic barrier
 GpuBarrier :: (cmd: *CommandBuffer, before: VkPipelineStageFlagBits2, after: VkPipelineStageFlagBits2) {
@@ -1688,6 +1558,7 @@ InitializeVulkanAndWindow :: () -> *Window {
       timelineSemaphore = xx true,
       bufferDeviceAddress = xx true,
       scalarBlockLayout = xx true,
+      shaderInt8 = xx true,
    };
 
    deviceCreateInfo: VkDeviceCreateInfo = .{
