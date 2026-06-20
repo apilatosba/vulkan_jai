@@ -1349,6 +1349,24 @@ Submit :: (cmd: *CommandBuffer, waitSemaphores: [] Semaphore = .{}, signalSemaph
    assert(vkResult == VK_SUCCESS);
 }
 
+VENDOR_ID_AMD:    u32 : 0x1002;
+VENDOR_ID_NVIDIA: u32 : 0x10DE;
+VENDOR_ID_INTEL:  u32 : 0x8086;
+
+GetDriverVersionString :: (driverVersion: u32, vendorId: u32) -> string {
+   sb: String_Builder;
+
+   if vendorId == {
+      case VENDOR_ID_NVIDIA;
+         print_to_builder(*sb, "%.%.%.%", driverVersion >> 22, (driverVersion >> 14) & 0xFF, (driverVersion >> 6) & 0xFF, driverVersion & 0x3F);
+      case;
+         print_to_builder(*sb, "%.%.%", driverVersion >> 22, (driverVersion >> 12) & 0x3FF, (driverVersion >> 6) & 0xFFF);
+   }
+
+   return builder_to_string(*sb);
+}
+
+
 InitializeVulkanAndWindow :: () -> *Window {
    #if OS == .LINUX {
       vulkan := dlopen("libvulkan.so.1", RTLD_LAZY);
@@ -1422,6 +1440,7 @@ InitializeVulkanAndWindow :: () -> *Window {
 
    vkGetPhysicalDeviceFeatures(vk.physicalDevice, *physicalDeviceFeatures);
    print("Selected physical device: %\n", to_string(vk.physicalDeviceProperties.deviceName.data));
+   print("Driver version: %\n", GetDriverVersionString(vk.physicalDeviceProperties.driverVersion, vk.physicalDeviceProperties.vendorID));
    print("API version: %\n", VkVersionToString(vk.physicalDeviceProperties.apiVersion,, temp));
    maxMsaaSamples := GetMaxSupportedMsaaSamples(vk.physicalDeviceProperties);
    vk.maxMsaaSamples = maxMsaaSamples;
@@ -1443,6 +1462,8 @@ InitializeVulkanAndWindow :: () -> *Window {
       to_c_string(VK_EXT_SHADER_OBJECT_EXTENSION_NAME,, temp),
       to_c_string(VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,, temp),
       to_c_string(VK_KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME,, temp),
+      to_c_string(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,, temp),
+      to_c_string(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,, temp),
       // VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME // promoted to core in 1.3
    ];
 
@@ -1506,9 +1527,15 @@ InitializeVulkanAndWindow :: () -> *Window {
       shaderInt64 = xx true,
    };
 
+   accelerationStructureFeatures: VkPhysicalDeviceAccelerationStructureFeaturesKHR = .{
+      sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+      pNext = null,
+      accelerationStructure = xx true,
+   };
+
    shaderUntypedPointersFeatures: VkPhysicalDeviceShaderUntypedPointersFeaturesKHR = .{
       sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_UNTYPED_POINTERS_FEATURES_KHR,
-      pNext = null,
+      pNext = *accelerationStructureFeatures,
       shaderUntypedPointers = xx true,
    };
 
@@ -1567,14 +1594,14 @@ InitializeVulkanAndWindow :: () -> *Window {
       pQueueCreateInfos = *deviceQueueCreateInfo,
       queueCreateInfoCount = 1,
       pEnabledFeatures = *deviceFeaturesToEnable,
-      enabledLayerCount = layersToEnable.count,
-      ppEnabledLayerNames = layersToEnable.data,
+      enabledLayerCount = 0,
+      ppEnabledLayerNames = null,
       enabledExtensionCount = deviceExtensionsToEnable.count,
       ppEnabledExtensionNames = deviceExtensionsToEnable.data,
    };
 
    vkResult = vkCreateDevice(vk.physicalDevice, *deviceCreateInfo, null, *vk.device);
-   assert(vkResult == VK_SUCCESS);
+   assert(vkResult == VK_SUCCESS, "result: %", vkResult);
    load_vulkan_device_procedures(vk.device);
    VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_DEVICE, xx vk.device, "ApilaVkDevice");
 
