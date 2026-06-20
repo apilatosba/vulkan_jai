@@ -1133,7 +1133,7 @@ AcquireSwapchainImage :: (window: *Window) {
    // transition layout to general
    {
       cmd := StartCommandRecording();
-      defer Submit(cmd);
+      defer Submit(cmd, waitSemaphores = .[.{window.acquireImageSemaphores[frameIndex], 0 /* ignored for binary semaphores */}]);
 
       barrier: VkImageMemoryBarrier2 = .{
          sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -1260,7 +1260,6 @@ SubmitAndPresent :: (cmd: *CommandBuffer, window: *Window) {
 
    Submit(
       cmd,
-      waitSemaphores = .[.{window.acquireImageSemaphores[frameIndex], 0 /* ignored for binary semaphores */}],
       signalSemaphores = .[.{window.queueSubmitSemaphores[frameIndex], 0 /* ignored for binary semaphores */}],
       fence = window.queueSubmitFences[frameIndex]
    );
@@ -1312,7 +1311,7 @@ Submit :: (cmd: *CommandBuffer, waitSemaphores: [] Semaphore = .{}, signalSemaph
       pNext = null,
       semaphore = vk.graphicsQueueTimelineSemaphore.semaphore,
       value = cmd.doneTimelineValue,
-      stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, // idk what i do
+      stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
    };
 
    for 1..signalSemaphores.count {
@@ -1321,6 +1320,7 @@ Submit :: (cmd: *CommandBuffer, waitSemaphores: [] Semaphore = .{}, signalSemaph
          pNext = null,
          semaphore = signalSemaphores[it - 1].semaphore,
          value = signalSemaphores[it - 1].value,
+         stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
       };
    };
 
@@ -1331,6 +1331,7 @@ Submit :: (cmd: *CommandBuffer, waitSemaphores: [] Semaphore = .{}, signalSemaph
          pNext = null,
          semaphore = waitSemaphores[it].semaphore,
          value = waitSemaphores[it].value,
+         stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
       };
    };
 
