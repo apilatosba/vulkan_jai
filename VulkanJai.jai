@@ -315,20 +315,14 @@ VulkanThings :: struct {
    // the xDescriptorHeapSize fields contain the size of the whole heap including the driver reserved range
    // so the user heap ends at xDescriptorHeapSize - minxHeapReservedRange
    //
-   imageDescriptorHeap:                         struct { cpu: *void; gpu: u64; };
-   imageDescriptorHeapSize:                     int;
-   imageDescriptorSize:                         int; // this is already aligned size
-   samplerDescriptorHeap:                       struct { cpu: *void; gpu: u64; };
-   samplerDescriptorHeapSize:                   int;
-   samplerDescriptorSize:                       int; // this is already aligned size
+   resourceHeap:                                struct { cpu: *void; gpu: u64; };
+   resourceHeapSize:                            int;
+   imageDescriptorStride:                       int; // aligned size
+   accelerationStructureDescriptorStride:       int; // aligned size
+   samplerHeap:                                 struct { cpu: *void; gpu: u64; };
+   samplerHeapSize:                             int;
+   samplerDescriptorStride:                     int; // aligned size
    descriptorHeapProperties:                    VkPhysicalDeviceDescriptorHeapPropertiesEXT;
-
-   // on my machine VkPhysicalDeviceDescriptorHeapPropertiesEXT.minResourceHeapReservedRange is 96768.
-   //
-   // the imageDescriptorSize on my machine is 32.
-   // the aligment is also 32 so it is nice.
-   DESIRED_IMAGE_DESCRIPTOR_COUNT_ON_THE_HEAP :: 169_420; // 1.048.576 is the max on my machine
-   DESIRED_SAMPLER_DESCRIPTOR_COUNT_ON_THE_HEAP :: 32; // 32 is the maximum on my machine
 }
 
 // stores a single VkCommandBuffer and all the command buffers allocated from it
@@ -409,16 +403,6 @@ SamplerInfo :: struct {
 vk:                     VulkanThings;
 glfwWindowToWindow:     Table(*GLFWwindow, *Window /* allocated on heap (pointer is stable throughout the lifetime of the window) */);
 
-//
-// BUG:
-// there is a bug when resizing window it stops rendering and weird glitches happen.
-// also sometimes after resizing it doesnt go back to normal and i have to resize again to make it go normal.
-// i guess the issue is related to how i recreate swapchain
-//
-// i checked the bgfx examples and the behaviour is the exact same as mine
-// idk maybe it is my pc (driver or x11 or the combination of both)
-//
-
 // generic barrier
 GpuBarrier :: (cmd: *CommandBuffer, before: VkPipelineStageFlagBits2, after: VkPipelineStageFlagBits2) {
    memoryBarrier: VkMemoryBarrier2 = .{
@@ -487,7 +471,7 @@ DispatchMesh :: (cmd: *CommandBuffer, taskDataPointer: u64, meshDataPointer: u64
    vkCmdDrawMeshTasksEXT(cmd.cmd, x, y, z);
 }
 
-SetMeshletPipeline :: (cmd: *CommandBuffer, pipeline: MeshletPipeline) {
+BindMeshletPipeline :: (cmd: *CommandBuffer, pipeline: MeshletPipeline) {
    // Validation Error: [ VUID_Undefined ] | MessageID = 0x79de34d4
    // vkCmdDrawMeshTasksEXT(): There is no graphics pipeline bound and vkCmdBindShadersEXT() was not called with stage VK_SHADER_STAGE_VERTEX_BIT and either VK_NULL_HANDLE
    // or a valid VK_SHADER_STAGE_VERTEX_BIT shader (Even if you are using a mesh shader, a VK_NULL_HANDLE must be bound to the vertex stage).
@@ -644,10 +628,10 @@ ActivateDescriptorHeaps :: (cmd: *CommandBuffer) {
       sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_EXT,
       pNext = null,
       heapRange = .{
-         address = vk.imageDescriptorHeap.gpu,
-         size = xx vk.imageDescriptorHeapSize,
+         address = vk.resourceHeap.gpu,
+         size = xx vk.resourceHeapSize,
       },
-      reservedRangeOffset = xx vk.imageDescriptorHeapSize - vk.descriptorHeapProperties.minResourceHeapReservedRange,
+      reservedRangeOffset = xx vk.resourceHeapSize - vk.descriptorHeapProperties.minResourceHeapReservedRange,
       reservedRangeSize = vk.descriptorHeapProperties.minResourceHeapReservedRange,
    };
 
@@ -656,10 +640,10 @@ ActivateDescriptorHeaps :: (cmd: *CommandBuffer) {
    samplerHeapBindInfo: VkBindHeapInfoEXT = .{
       sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_EXT,
       heapRange = .{
-         address = vk.samplerDescriptorHeap.gpu,
-         size = xx vk.samplerDescriptorHeapSize,
+         address = vk.samplerHeap.gpu,
+         size = xx vk.samplerHeapSize,
       },
-      reservedRangeOffset = xx vk.samplerDescriptorHeapSize - vk.descriptorHeapProperties.minSamplerHeapReservedRange,
+      reservedRangeOffset = xx vk.samplerHeapSize - vk.descriptorHeapProperties.minSamplerHeapReservedRange,
       reservedRangeSize = vk.descriptorHeapProperties.minSamplerHeapReservedRange,
    };
 
@@ -694,8 +678,8 @@ WriteSamplerDescriptors :: (startIndex: int, descriptors: [] SamplerInfo) {
 
       index := startIndex + it_index;
       hostAddressRanges[it_index] = .{
-         address = vk.samplerDescriptorHeap.cpu.(*u8) + (index * vk.samplerDescriptorSize),
-         size = xx vk.samplerDescriptorSize,
+         address = vk.samplerHeap.cpu.(*u8) + (index * vk.samplerDescriptorStride),
+         size = vk.descriptorHeapProperties.samplerDescriptorSize,
       };
    }
 
@@ -703,13 +687,46 @@ WriteSamplerDescriptors :: (startIndex: int, descriptors: [] SamplerInfo) {
    assert(vkResult == VK_SUCCESS);
 }
 
+//
+// the new design of this function:
+// since now i have other resource types than just images, i need to do something about it.
+// i was thinking about paritioning the heap for each resource type but i dont think that scales
+// and even if you have sapce on the heap if you partition poorly you might run out of space within a partition.
+// im thinking to use the whole partition for every resource type. there will be fragmentation if the descriptor sizes
+// do not match (which is the case for my driver) but not a big deal. and i am thinking about passing the indices to the shader (this is how i will design the compiler).
+// i think i will have the user of this library to work with offsets rather than indices (because they vary depending on the resource):
+//       // for each resource type an overload
+//       WriteResourceDescriptor :: (offset: int, descriptor: [] Image);
+//       WriteResourceDescriptor :: (offset: int, descriptor: [] AccelerationStructure);
+//
+// the user has to know the size of each descriptor to be able to use these functions and also to determine the index to pass data to the shader
+// now i think about it maybe using indices is not a great idea if everything is offset based, it just creates an additional friction without a benefit.
+// yea i think offsets are definitely better since we dont need to deal with artificial indices that doesnt really mean anything since there multiple types of resources with varying sizes.
+//
+// i found out that you can "lie" in the spirv that the stride of the descriptor is 1. you dont need to create a OpRuntimeArray of u8.
+// i found out because this is what glsl does if you do:
+//    layout(descriptor_heap, descriptor_stride = 1)
+// it keeps the underlying type the same but doesnt use the result of OpConstantSizeOf thingy but passes one. which is a lie but works i guess.
+// this should be really easy to implement to my compiler Clueless. i think i can have a module parameter that tells what the indexing mode of the resource/sampler heaps be.
+//          - apila, 27/06/26
+//
+// there are two approaches to how you handle the data inside the descriptor heap.
+// in spirv if you set the types using OpConstantSizeOfEXT, OpTypeAccelerationStructureKHR, OpTypeImage
+// then when you do access chain OpUntypedAccessChainKHR, the number you provide is the index of the resource.
+// the thing is if you have multiple kinds of resources (acceleration structure + images) then when you are sending which resource
+// you want to use to the shader, you must provide the index offset for that resource type, this is not hard to calculate but feels weird
+// as you divide the offset by the size of the resource descriptor.
+// the second approach is to only have one OpTypeRuntimeArray of type u8 for all resource types (one array view entire resource heap).
+// if you do this then you would need to send the byte offset of the resource within the resource heap rather than the index of it.
+//             - apila, 27/06/26
+//
 // sort of the equivalent of:
 //    textureHeap[index] = gpuTextureViewDescriptor(texture, { .format = FORMAT_RGBA8_UNORM });
 // in no graphics api blog post (https://www.sebastianaaltonen.com/blog/no-graphics-api)
 //
 // usage idea in game engine: use StableIndexArray to store your image descriptors
 // so it works out of the box with deleting/adding new images. for example when you load a new scene
-WriteImageDescriptors :: (startIndex: int, descriptors: [] Image) {
+WriteImageDescriptors :: (startOffset: int, descriptors: [] Image) {
    resourceDescriptorInfos := NewArray(descriptors.count, VkResourceDescriptorInfoEXT,, temp);
    hostAddressRanges := NewArray(descriptors.count, VkHostAddressRangeEXT,, temp);
 
@@ -750,15 +767,95 @@ WriteImageDescriptors :: (startIndex: int, descriptors: [] Image) {
          data.pImage = *imageDescriptorInfo,
       };
 
-      index := startIndex + it_index;
+      offset := startOffset + (it_index * vk.imageDescriptorStride);
       hostAddressRanges[it_index] = .{
-         address = vk.imageDescriptorHeap.cpu.(*u8) + (index * vk.imageDescriptorSize),
-         size = xx vk.imageDescriptorSize,
+         address = vk.resourceHeap.cpu.(*u8) + offset,
+         size = vk.descriptorHeapProperties.imageDescriptorSize,
       };
    }
 
    vkResult := vkWriteResourceDescriptorsEXT(vk.device, xx resourceDescriptorInfos.count, resourceDescriptorInfos.data, hostAddressRanges.data);
    assert(vkResult == VK_SUCCESS);
+}
+
+// meant to be used to keep track of the next offset in the resource heap when you write descriptors to it.    - apila, 24/08/26
+GetSizeOfDescriptors :: (descriptors: [] Image) -> int {
+   return vk.imageDescriptorStride * descriptors.count;
+}
+
+IDENTITY_TRANSFORM_MATRIX :: VkTransformMatrixKHR.{
+   matrix = .[
+      .[1.0, 0.0, 0.0, 0.0],
+      .[0.0, 1.0, 0.0, 0.0],
+      .[0.0, 0.0, 1.0, 0.0]
+   ]
+};
+
+AccelerationStructure :: struct {
+
+}
+
+// can be a submesh too (and usually is), meaning that one instance of this struct doesn't need to contain all the vertices given in the vertexData, vertexCount pair.
+TrianglesInfo :: struct {
+   vertexFormat:        VkFormat;
+   vertexData:          u64; // gpu pointer
+   vertexCount:         int;
+   vertexStride:        int;
+   indexType:           VkIndexType;
+   indexData:           u64;  // do your offsetting for submeshes here
+                              // keep the whole vertices buffer as is
+   primitiveCount:      int; // from onwards indexData
+
+   // to flatten the hierarchy.
+   // if there is no hierarchy (if loaded from obj or something, idk) then the default value is okay
+   localToRootMatrix:   VkTransformMatrixKHR = IDENTITY_TRANSFORM_MATRIX;
+}
+
+BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
+   assert(false, "not yet implemented!");
+   return .{};
+}
+
+InstanceInfo :: struct {
+   blasReference:    AccelerationStructure;
+   modelMatrix:      VkTransformMatrixKHR;
+}
+
+BuildTLAS :: (instances: [] InstanceInfo) -> AccelerationStructure {
+   assert(false, "not yet implemented!");
+   return .{};
+}
+
+RayTracingPipeline :: struct {
+   pipeline: VkPipeline;
+}
+
+RayHitGroup :: struct {
+   closestHit:    [] u8;
+   anyHit:        [] u8;
+   intersection:  [] u8;
+}
+
+// i think if i need the inline sbt data then idk what to do. i can get the sizes and shit here maybe and then
+// create a function that lets the user to write to it given the indices and group type (raygen, miss, hit).
+//
+// i am assuming i would do sbt generation here and store the necessary data in the returned struct.
+//
+//       - apila, 26/06/26
+//
+// maxRecursionDepth: you know the shaders you have written. ideally it is 1, you only call traceRayEXT inside the raygen shader in a loop.
+CreateRayTracingPipeline :: (raygens: [][] u8, misses: [][] u8, hitGroups: [] RayHitGroup, maxRecursionDepth: int) -> RayTracingPipeline {
+   assert(false, "not yet impelmentd!");
+   return .{};
+}
+
+BindRayTracingPipeline :: (cmd: *CommandBuffer, pipeline: RayTracingPipeline) {
+   assert(false, "not yet implemented!");
+}
+
+// raygenIndex: index of the raygen given to CreateRayTracingPipeline. this function then calculates the address in the sbt.
+TraceRays :: (cmd: *CommandBuffer, pipeline: RayTracingPipeline, raygenIndex: int) {
+   assert(false, "not yet implemented!");
 }
 
 alignof :: ($T: Type) -> s64 #expand {
@@ -781,9 +878,15 @@ GpuMalloc :: ($T: Type, count: int, type: MemoryType = .Default, debugName := ""
    return array, gpu;
 }
 
+// maybe i will use this as a return value of GpuMalloc
+SVP :: struct {
+   cpu: *void;
+   gpu: u64;
+}
+
 // vma does auto alignment for idk some stuff but not for descriptor heaps
 // so you better specify the alignment when creating a descriptor heap
-GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false) -> cpu: *void, gpu: u64 {
+GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false, $IS_ACCELERATION_STRUCTURE := false, $IS_GEOMETRY := false, $IS_SBT := false) -> cpu: *void, gpu: u64 {
    memoryPropertyFlags: VkMemoryPropertyFlags;
    memoryUsage: VmaMemoryUsage;
 
@@ -814,6 +917,23 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
 
    #if (IS_DESCRIPTOR_HEAP) {
       bufferCreateInfo.usage |= VK_BUFFER_USAGE_DESCRIPTOR_HEAP_BIT_EXT;
+   }
+
+   #if (IS_ACCELERATION_STRUCTURE) {
+      bufferCreateInfo.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+   }
+
+   //
+   // idk maybe IS_GEOMETRY is not a good name. the name IS_GEOMETRY hints that this library is purely for ray tracing
+   // which is not true. so lets say you use the rasterizer and you set this flag anyways, not a big deal surely Clueless
+   //       - apila, 26/06/26
+   //
+   #if (IS_GEOMETRY) {
+      bufferCreateInfo.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+   }
+
+   #if (IS_SBT) {
+      bufferCreateInfo.usage |= VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
    }
 
    allocationCreateInfo: VmaAllocationCreateInfo = .{
@@ -959,6 +1079,11 @@ CreateMeshletPipeline :: (taskSpirv: [] u8,
       outShaders[1],
       outShaders[2]
    };
+}
+
+WaitDevice :: () {
+   result := vkDeviceWaitIdle(vk.device);
+   assert(result == VK_SUCCESS, "result: %", result);
 }
 
 DestroyMeshletPipeline :: (using pipeline: MeshletPipeline) {
@@ -1367,8 +1492,11 @@ GetDriverVersionString :: (driverVersion: u32, vendorId: u32) -> string {
    return builder_to_string(*sb);
 }
 
-
-InitializeVulkanAndWindow :: () -> *Window {
+// resource heap max size is 32MB on my machine (driver reserved range included).
+// sampler heap max size is 128KB on my machine (driver reserved range included).
+// since they are not too much by default i set the desired count U32_MAX, which then will be clamped
+//          - apila, 26/06/26
+InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSamplerHeapSize: u32 = U32_MAX) -> *Window {
    #if OS == .LINUX {
       vulkan := dlopen("libvulkan.so.1", RTLD_LAZY);
       assert(vulkan != null);
@@ -1464,6 +1592,7 @@ InitializeVulkanAndWindow :: () -> *Window {
       to_c_string(VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME,, temp),
       to_c_string(VK_KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME,, temp),
       to_c_string(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,, temp),
+      to_c_string(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,, temp),
       to_c_string(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,, temp),
       // VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME // promoted to core in 1.3
    ];
@@ -1696,25 +1825,17 @@ InitializeVulkanAndWindow :: () -> *Window {
    Thread.init(*vk.gpuPointerToAllocationInfosMutex);
 
    {
-      vk.imageDescriptorSize = Align(xx vk.descriptorHeapProperties.imageDescriptorSize, xx vk.descriptorHeapProperties.imageDescriptorAlignment);
-      imageDescriptorCount := min(
-         vk.DESIRED_IMAGE_DESCRIPTOR_COUNT_ON_THE_HEAP,
-         xx vk.descriptorHeapProperties.maxResourceHeapSize / vk.imageDescriptorSize
-      );
-      vk.imageDescriptorHeapSize = imageDescriptorCount * vk.imageDescriptorSize;
-      vk.imageDescriptorHeapSize = Align(vk.imageDescriptorHeapSize, xx vk.descriptorHeapProperties.resourceHeapAlignment);
-      vk.imageDescriptorHeapSize += xx vk.descriptorHeapProperties.minResourceHeapReservedRange;
-      vk.imageDescriptorHeap.cpu, vk.imageDescriptorHeap.gpu = GpuMalloc(vk.imageDescriptorHeapSize, xx vk.descriptorHeapProperties.resourceHeapAlignment, debugName = "image descriptor heap", IS_DESCRIPTOR_HEAP = true);
+      vk.imageDescriptorStride = Align(xx vk.descriptorHeapProperties.imageDescriptorSize, xx vk.descriptorHeapProperties.imageDescriptorAlignment);
+      vk.accelerationStructureDescriptorStride = Align(xx vk.descriptorHeapProperties.bufferDescriptorSize, xx vk.descriptorHeapProperties.bufferDescriptorAlignment);
+      vk.samplerDescriptorStride = Align(xx vk.descriptorHeapProperties.samplerDescriptorSize, xx vk.descriptorHeapProperties.samplerDescriptorAlignment);
 
-      vk.samplerDescriptorSize = Align(xx vk.descriptorHeapProperties.samplerDescriptorSize, xx vk.descriptorHeapProperties.samplerDescriptorAlignment);
-      samplerDescriptorCount := min(
-         vk.DESIRED_SAMPLER_DESCRIPTOR_COUNT_ON_THE_HEAP,
-         xx vk.descriptorHeapProperties.maxSamplerHeapSize / vk.samplerDescriptorSize
-      );
-      vk.samplerDescriptorHeapSize = samplerDescriptorCount * samplerDescriptorCount;
-      vk.samplerDescriptorHeapSize = Align(vk.samplerDescriptorHeapSize, xx vk.descriptorHeapProperties.samplerHeapAlignment);
-      vk.samplerDescriptorHeapSize += xx vk.descriptorHeapProperties.minSamplerHeapReservedRange;
-      vk.samplerDescriptorHeap.cpu, vk.samplerDescriptorHeap.gpu = GpuMalloc(vk.samplerDescriptorHeapSize, xx vk.descriptorHeapProperties.samplerHeapAlignment, debugName = "sampler descriptor heap", IS_DESCRIPTOR_HEAP = true);
+      vk.resourceHeapSize = xx min(vk.descriptorHeapProperties.maxResourceHeapSize, desiredResourceHeapSize + vk.descriptorHeapProperties.minResourceHeapReservedRange);
+      vk.resourceHeapSize = Align(vk.resourceHeapSize, xx vk.descriptorHeapProperties.resourceHeapAlignment);
+      vk.resourceHeap.cpu, vk.resourceHeap.gpu = GpuMalloc(vk.resourceHeapSize, xx vk.descriptorHeapProperties.resourceHeapAlignment, debugName = "image descriptor heap", IS_DESCRIPTOR_HEAP = true);
+
+      vk.samplerHeapSize = xx min(vk.descriptorHeapProperties.maxSamplerHeapSize, desiredSamplerHeapSize + vk.descriptorHeapProperties.minSamplerHeapReservedRange);
+      vk.samplerHeapSize = Align(vk.samplerHeapSize, xx vk.descriptorHeapProperties.samplerHeapAlignment);
+      vk.samplerHeap.cpu, vk.samplerHeap.gpu = GpuMalloc(vk.samplerHeapSize, xx vk.descriptorHeapProperties.samplerHeapAlignment, debugName = "sampler descriptor heap", IS_DESCRIPTOR_HEAP = true);
    }
 
    return window;

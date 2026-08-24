@@ -6,7 +6,6 @@
 #import "Hash_Table";
 #import "ApilaDispatch";
 
-
 MyStruct :: struct {
    x: int = 69;
    y: int = 420;
@@ -14,10 +13,11 @@ MyStruct :: struct {
 
 #run {
    set_build_options_dc(.{ do_output = false });
-   InitializeThreads();
 
-   ms: MyStruct = .{
-      y = 12,
-   };
-   print("ms: %\n", ms);
+   a :: int;
+   b :: #type int;
+   assert(a == b);
+
+   print("%\n", a);
+   print("%\n", b);
 }
