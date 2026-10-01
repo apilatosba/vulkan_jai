@@ -323,6 +323,8 @@ VulkanThings :: struct {
    samplerHeapSize:                             int;
    samplerDescriptorStride:                     int; // aligned size
    descriptorHeapProperties:                    VkPhysicalDeviceDescriptorHeapPropertiesEXT;
+   accelerationStructureProperties:             VkPhysicalDeviceAccelerationStructurePropertiesKHR;
+   rayTracingPipelineProperties:                VkPhysicalDeviceRayTracingPipelinePropertiesKHR;
 }
 
 // stores a single VkCommandBuffer and all the command buffers allocated from it
@@ -422,6 +424,64 @@ GpuBarrier :: (cmd: *CommandBuffer, before: VkPipelineStageFlagBits2, after: VkP
    };
 
    vkCmdPipelineBarrier2(cmd.cmd, *dependencyInfo);
+}
+
+CalculateMipmapSize :: inline (base: int, mipLevel: int) -> int {
+   return max(1, base >> mipLevel);
+}
+
+BlitImage :: (cmd: *CommandBuffer, source: Image, destination: Image, sourceMip: int, destinationMip: int, filter: VkFilter) {
+   assert(sourceMip < source.description.mipLevels);
+   assert(destinationMip < destination.description.mipLevels);
+   assert((source.description.usage & .VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0);
+   assert((destination.description.usage & .VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0);
+   assert(!(source.image == destination.image && sourceMip == destinationMip));
+
+   blitRegion: VkImageBlit2 = .{
+      sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
+      pNext = null,
+   };
+
+   blitRegion.srcOffsets[0].x = 0;
+   blitRegion.srcOffsets[0].y = 0;
+   blitRegion.srcOffsets[0].z = 0;
+
+   blitRegion.srcOffsets[1].x = xx CalculateMipmapSize(source.description.size[0], sourceMip);
+   blitRegion.srcOffsets[1].y = xx CalculateMipmapSize(source.description.size[1], sourceMip);
+   blitRegion.srcOffsets[1].z = xx CalculateMipmapSize(source.description.size[2], sourceMip);
+
+   blitRegion.dstOffsets[0].x = 0;
+   blitRegion.dstOffsets[0].y = 0;
+   blitRegion.dstOffsets[0].z = 0;
+
+   blitRegion.dstOffsets[1].x = xx CalculateMipmapSize(destination.description.size[0], destinationMip);
+   blitRegion.dstOffsets[1].y = xx CalculateMipmapSize(destination.description.size[1], destinationMip);
+   blitRegion.dstOffsets[1].z = xx CalculateMipmapSize(destination.description.size[2], destinationMip);
+
+   // maybe infer the aspectMask from the format?  - apila, 25/08/26
+   blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+   blitRegion.srcSubresource.baseArrayLayer = 0;
+   blitRegion.srcSubresource.layerCount = source.description.arrayLayers;
+   blitRegion.srcSubresource.mipLevel = xx sourceMip;
+
+   blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+   blitRegion.dstSubresource.baseArrayLayer = 0;
+   blitRegion.dstSubresource.layerCount = source.description.arrayLayers;
+   blitRegion.dstSubresource.mipLevel = xx destinationMip;
+
+   blitInfo: VkBlitImageInfo2 = .{
+      sType = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2,
+      pNext = null,
+      dstImage = destination.image,
+      dstImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+      srcImage = source.image,
+      srcImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+      filter = filter,
+      regionCount = 1,
+      pRegions = *blitRegion
+   };
+
+   vkCmdBlitImage2(cmd.cmd, *blitInfo);
 }
 
 // source is a gpu pointer
@@ -624,7 +684,7 @@ CreateImage :: (gpuPointer: u64, description: ImageDescription, debugName := "")
 // it might worth the performance penalty of calling this for every command buffer ever recorded. idk tho and didnt create a benchmark so im gonna keep this design for now
 //    - apila, 29/03/26
 ActivateDescriptorHeaps :: (cmd: *CommandBuffer) {
-   imageHeapBindInfo: VkBindHeapInfoEXT = .{
+   resourceHeapBindInfo: VkBindHeapInfoEXT = .{
       sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_EXT,
       pNext = null,
       heapRange = .{
@@ -635,7 +695,7 @@ ActivateDescriptorHeaps :: (cmd: *CommandBuffer) {
       reservedRangeSize = vk.descriptorHeapProperties.minResourceHeapReservedRange,
    };
 
-   vkCmdBindResourceHeapEXT(cmd.cmd, *imageHeapBindInfo);
+   vkCmdBindResourceHeapEXT(cmd.cmd, *resourceHeapBindInfo);
 
    samplerHeapBindInfo: VkBindHeapInfoEXT = .{
       sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_EXT,
@@ -687,6 +747,15 @@ WriteSamplerDescriptors :: (startIndex: int, descriptors: [] SamplerInfo) {
    assert(vkResult == VK_SUCCESS);
 }
 
+// used in WriteImageDescriptors, VkResourceDescriptorInfoEXT.
+// if an image used in both ways then you have to create two descriptors for the same image.
+// for example a compute shader uses the image as Storage and then later you use it in a fragment shader as Sampled.
+// in that case you create two descriptors with different ImageDescriptorType.
+ImageDescriptorType :: enum #specified {
+   Sampled :: VkDescriptorType.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+   Storage :: VkDescriptorType.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+}
+
 //
 // the new design of this function:
 // since now i have other resource types than just images, i need to do something about it.
@@ -726,12 +795,14 @@ WriteSamplerDescriptors :: (startIndex: int, descriptors: [] SamplerInfo) {
 //
 // usage idea in game engine: use StableIndexArray to store your image descriptors
 // so it works out of the box with deleting/adding new images. for example when you load a new scene
-WriteImageDescriptors :: (startOffset: int, descriptors: [] Image) {
+WriteImageDescriptors :: (startOffset: int, descriptors: [] Image, type: ImageDescriptorType) {
    resourceDescriptorInfos := NewArray(descriptors.count, VkResourceDescriptorInfoEXT,, temp);
    hostAddressRanges := NewArray(descriptors.count, VkHostAddressRangeEXT,, temp);
+   imageViewCreateInfos := NewArray(descriptors.count, VkImageViewCreateInfo,, temp);
+   imageDescriptorInfos := NewArray(descriptors.count, VkImageDescriptorInfoEXT,, temp);
 
    for descriptors {
-      imageViewCreateInfo: VkImageViewCreateInfo = .{
+      imageViewCreateInfos[it_index] = .{
          sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
          pNext = null,
          flags = 0,
@@ -753,18 +824,18 @@ WriteImageDescriptors :: (startOffset: int, descriptors: [] Image) {
          },
       };
 
-      imageDescriptorInfo: VkImageDescriptorInfoEXT = .{
+      imageDescriptorInfos[it_index] = .{
          sType = VK_STRUCTURE_TYPE_IMAGE_DESCRIPTOR_INFO_EXT,
          pNext = null,
-         pView = *imageViewCreateInfo,
+         pView = *imageViewCreateInfos[it_index],
          layout = VK_IMAGE_LAYOUT_GENERAL,
       };
 
       resourceDescriptorInfos[it_index] = .{
          sType = VK_STRUCTURE_TYPE_RESOURCE_DESCRIPTOR_INFO_EXT,
          pNext = null,
-         type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-         data.pImage = *imageDescriptorInfo,
+         type = xx type,
+         data.pImage = *imageDescriptorInfos[it_index],
       };
 
       offset := startOffset + (it_index * vk.imageDescriptorStride);
@@ -778,9 +849,42 @@ WriteImageDescriptors :: (startOffset: int, descriptors: [] Image) {
    assert(vkResult == VK_SUCCESS);
 }
 
+WriteAccelerationStructureDescriptors :: (startOffset: int, descriptors: [] AccelerationStructure) {
+   resourceDescriptorInfos := NewArray(descriptors.count, VkResourceDescriptorInfoEXT,, temp);
+   hostAddressRanges := NewArray(descriptors.count, VkHostAddressRangeEXT,, temp);
+   deviceAddressRanges := NewArray(descriptors.count, VkDeviceAddressRangeEXT,, temp);
+
+   for descriptors {
+      deviceAddressRanges[it_index] = .{
+         address = descriptors[it_index].deviceAddress,
+         size = xx descriptors[it_index].size,
+      };
+
+      resourceDescriptorInfos[it_index] = .{
+         sType = VK_STRUCTURE_TYPE_RESOURCE_DESCRIPTOR_INFO_EXT,
+         pNext = null,
+         type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+         data.pAddressRange = *deviceAddressRanges[it_index],
+      };
+
+      offset := startOffset + (it_index * vk.accelerationStructureDescriptorStride);
+      hostAddressRanges[it_index] = .{
+         address = vk.resourceHeap.cpu.(*u8) + offset,
+         size = vk.descriptorHeapProperties.bufferDescriptorSize,
+      };
+   }
+
+   vkResult := vkWriteResourceDescriptorsEXT(vk.device, xx resourceDescriptorInfos.count, resourceDescriptorInfos.data, hostAddressRanges.data);
+   assert(vkResult == VK_SUCCESS);
+}
+
 // meant to be used to keep track of the next offset in the resource heap when you write descriptors to it.    - apila, 24/08/26
 GetSizeOfDescriptors :: (descriptors: [] Image) -> int {
    return vk.imageDescriptorStride * descriptors.count;
+}
+
+GetSizeOfDescriptors :: (descriptors: [] AccelerationStructure) -> int {
+   return vk.accelerationStructureDescriptorStride * descriptors.count;
 }
 
 IDENTITY_TRANSFORM_MATRIX :: VkTransformMatrixKHR.{
@@ -792,7 +896,20 @@ IDENTITY_TRANSFORM_MATRIX :: VkTransformMatrixKHR.{
 };
 
 AccelerationStructure :: struct {
+   accelerationStructure:  VkAccelerationStructureKHR;
 
+   // https://docs.vulkan.org/refpages/latest/refpages/source/vkGetAccelerationStructureDeviceAddressKHR.html
+   // "For acceleration structures created with vkCreateAccelerationStructureKHR, their device address may be different from the buffer device address corresponding to the acceleration structure’s start offset in its storage buffer for acceleration structure types other than VK_ACCELERATION_STRUCTURE_TYPE_GENERIC_KHR."
+   gpuAddress:             u64; // address of the backing AS storage buffer allocated via GpuMalloc
+   deviceAddress:          u64; // vkGetAccelerationStructureDeviceAddressKHR result
+
+   size:                   int;
+   type:                   VkAccelerationStructureTypeKHR;
+
+   // use this to wait for stuff. idk.
+   //    pSemaphores = *vk.graphicsQueueTimelineSemaphore.semaphore,
+   //    pValues = *cmd.doneTimelineValue,
+   cmd:                    CommandBuffer;
 }
 
 // can be a submesh too (and usually is), meaning that one instance of this struct doesn't need to contain all the vertices given in the vertexData, vertexCount pair.
@@ -812,22 +929,324 @@ TrianglesInfo :: struct {
 }
 
 BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
-   assert(false, "not yet implemented!");
-   return .{};
+   assert(geometries.count > 0);
+
+   geometryInfos := NewArray(geometries.count, VkAccelerationStructureGeometryKHR,, temp);
+   buildRangeInfos := NewArray(geometries.count, VkAccelerationStructureBuildRangeInfoKHR,, temp);
+   primitiveCounts := NewArray(geometries.count, u32,, temp);
+
+   transforms := NewArray(geometries.count, VkTransformMatrixKHR,, temp);
+   transformCpu, transformGpu := GpuMalloc(size_of(VkTransformMatrixKHR) * geometries.count, 16, debugName = "BuildBLAS transforms", IS_GEOMETRY = true);
+   defer GpuFree(transformGpu);
+
+   for geometries {
+      assert(it.vertexCount > 0, "vertexCount: %", it.vertexCount);
+      assert(it.primitiveCount > 0, "primitiveCount: %", it.primitiveCount);
+
+      transforms[it_index] = it.localToRootMatrix;
+
+      geometryInfos[it_index] = .{
+         sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+         pNext = null,
+         geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
+         flags = VK_GEOMETRY_OPAQUE_BIT_KHR,
+         geometry.triangles = .{
+            sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+            pNext = null,
+            vertexFormat = it.vertexFormat,
+            vertexData.deviceAddress = it.vertexData,
+            vertexStride = xx it.vertexStride,
+            maxVertex = xx (it.vertexCount - 1),
+            indexType = it.indexType,
+            indexData.deviceAddress = it.indexData,
+            transformData.deviceAddress = transformGpu + (it_index * size_of(VkTransformMatrixKHR)).(u64),
+         }
+      };
+
+      buildRangeInfos[it_index] = .{
+         primitiveCount = xx it.primitiveCount,
+         primitiveOffset = 0,
+         firstVertex = 0,
+         transformOffset = 0,
+      };
+
+      primitiveCounts[it_index] = xx it.primitiveCount;
+   }
+
+   memcpy(transformCpu, transforms.data, transforms.count * size_of(type_of(transforms[0])));
+
+   buildGeometryInfo: VkAccelerationStructureBuildGeometryInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+      pNext = null,
+      type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+      flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
+      mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+      srcAccelerationStructure = null,
+      dstAccelerationStructure = null,
+      geometryCount = xx geometryInfos.count,
+      pGeometries = geometryInfos.data,
+      ppGeometries = null,
+      scratchData.deviceAddress = 0,
+   };
+
+   sizeInfo: VkAccelerationStructureBuildSizesInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
+      pNext = null,
+   };
+
+   vkGetAccelerationStructureBuildSizesKHR(
+      vk.device,
+      VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+      *buildGeometryInfo,
+      primitiveCounts.data,
+      *sizeInfo
+   );
+
+   _, asStorageGpu := GpuMalloc(
+      sizeInfo.accelerationStructureSize.(int),
+      256,
+      type = .Gpu,
+      debugName = "BLAS storage",
+      IS_ACCELERATION_STRUCTURE = true
+   );
+   assert(asStorageGpu != 0);
+
+   Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
+   okAsStorage, asStorageAllocationInfo := table_find(*vk.gpuPointerToAllocationInfos, asStorageGpu);
+   Thread.unlock(*vk.gpuPointerToAllocationInfosMutex);
+   assert(okAsStorage);
+
+   asCreateInfo: VkAccelerationStructureCreateInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+      pNext = null,
+      createFlags = 0,
+      buffer = asStorageAllocationInfo.buffer,
+      offset = 0,
+      size = sizeInfo.accelerationStructureSize,
+      type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+      deviceAddress = 0,
+   };
+
+   outAs: VkAccelerationStructureKHR;
+   vkResult := vkCreateAccelerationStructureKHR(vk.device, *asCreateInfo, null, *outAs);
+   assert(vkResult == VK_SUCCESS);
+
+   buildGeometryInfo.dstAccelerationStructure = outAs;
+
+   _, scratchGpu := GpuMalloc(
+      sizeInfo.buildScratchSize.(int),
+      vk.accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment,
+      type = .Gpu,
+      debugName = "BLAS scratch"
+   );
+   assert(scratchGpu != 0);
+   defer GpuFree(scratchGpu);
+
+   buildGeometryInfo.scratchData.deviceAddress = scratchGpu;
+
+   buildRangePointers := (*VkAccelerationStructureBuildRangeInfoKHR).[buildRangeInfos.data];
+
+   cmd := StartCommandRecording();
+   vkCmdBuildAccelerationStructuresKHR(cmd.cmd, 1, *buildGeometryInfo, buildRangePointers.data);
+   Submit(cmd);
+
+   asDeviceAddressInfo: VkAccelerationStructureDeviceAddressInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+      pNext = null,
+      accelerationStructure = outAs,
+   };
+
+   asDeviceAddress := vkGetAccelerationStructureDeviceAddressKHR(vk.device, *asDeviceAddressInfo);
+   assert(asDeviceAddress != 0);
+
+   return .{
+      accelerationStructure = outAs,
+      gpuAddress = asStorageGpu,
+      deviceAddress = asDeviceAddress,
+      size = xx sizeInfo.accelerationStructureSize,
+      type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+      cmd = cmd,
+   };
 }
 
 InstanceInfo :: struct {
    blasReference:    AccelerationStructure;
    modelMatrix:      VkTransformMatrixKHR;
+   customIndex:      u32 = 0; // lower 24 bits
+   mask:             u8 = 0xFF;
+   sbtRecordOffset:  u32 = 0; // lower 24 bits
+   flags:            VkGeometryInstanceFlagsKHR = 0;
 }
 
-BuildTLAS :: (instances: [] InstanceInfo) -> AccelerationStructure {
-   assert(false, "not yet implemented!");
-   return .{};
+// implicit usage: waitTimelineValue=U64_MAX means dont wait
+BuildTLAS :: (instances: [] InstanceInfo, waitTimelineValue: u64) -> AccelerationStructure {
+   assert(instances.count > 0, "count: %", instances.count);
+
+   instanceDatas := NewArray(instances.count, VkAccelerationStructureInstanceKHR);
+   instanceDataCpuUntyped, instanceDataGpu := GpuMalloc(size_of(VkAccelerationStructureInstanceKHR) * instances.count, 16, debugName = "TLAS instances", IS_GEOMETRY = true);
+   defer GpuFree(instanceDataGpu);
+
+   instanceDataCpu := instanceDataCpuUntyped.(*VkAccelerationStructureInstanceKHR);
+
+   for instances {
+      assert(it.blasReference.accelerationStructure != null);
+      assert(it.blasReference.deviceAddress != 0);
+
+      customIndex24 := it.customIndex & 0x00FF_FFFF;
+      sbtOffset24 := it.sbtRecordOffset & 0x00FF_FFFF;
+
+      instanceDatas[it_index] = .{
+         transform = it.modelMatrix,
+         merged_bitfield_24_bits_for_instanceCustomIndex_8_bits_for_mask = customIndex24 | (it.mask.(u32) << 24),
+         merged_bitfield_24_bits_for_instanceShaderBindingTableRecordOffset_8_bits_for_flags = sbtOffset24 | ((it.flags & 0xFF) << 24).(u32),
+         accelerationStructureReference = it.blasReference.deviceAddress,
+      };
+   }
+
+   memcpy(instanceDataCpu, instanceDatas.data, instanceDatas.count * size_of(type_of(instanceDatas[0])));
+
+   geometryInfo: VkAccelerationStructureGeometryKHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+      pNext = null,
+      geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
+      flags = VK_GEOMETRY_OPAQUE_BIT_KHR, // opaque clueeeeeee Clueless
+      geometry.instances = .{
+         sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+         pNext = null,
+         arrayOfPointers = xx false,
+         data.deviceAddress = instanceDataGpu,
+      }
+   };
+
+   buildGeometryInfo: VkAccelerationStructureBuildGeometryInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+      pNext = null,
+      type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+      flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
+      mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+      srcAccelerationStructure = null,
+      dstAccelerationStructure = null,
+      geometryCount = 1,
+      pGeometries = *geometryInfo,
+      ppGeometries = null,
+      scratchData.deviceAddress = 0,
+   };
+
+   primitiveCount: u32 = xx instances.count;
+
+   sizeInfo: VkAccelerationStructureBuildSizesInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
+      pNext = null,
+   };
+
+   vkGetAccelerationStructureBuildSizesKHR(
+      vk.device,
+      VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+      *buildGeometryInfo,
+      *primitiveCount,
+      *sizeInfo
+   );
+
+   _, asStorageGpu := GpuMalloc(
+      sizeInfo.accelerationStructureSize.(int),
+      256,
+      type = .Gpu,
+      debugName = "TLAS storage",
+      IS_ACCELERATION_STRUCTURE = true
+   );
+   assert(asStorageGpu != 0);
+
+   Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
+   okAsStorage, asStorageAllocationInfo := table_find(*vk.gpuPointerToAllocationInfos, asStorageGpu);
+   Thread.unlock(*vk.gpuPointerToAllocationInfosMutex);
+   assert(okAsStorage);
+
+   asCreateInfo: VkAccelerationStructureCreateInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+      pNext = null,
+      createFlags = 0,
+      buffer = asStorageAllocationInfo.buffer,
+      offset = 0,
+      size = sizeInfo.accelerationStructureSize,
+      type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+      deviceAddress = 0,
+   };
+
+   outAs: VkAccelerationStructureKHR;
+   vkResult := vkCreateAccelerationStructureKHR(vk.device, *asCreateInfo, null, *outAs);
+   assert(vkResult == VK_SUCCESS, "vkResult: %", vkResult);
+
+   buildGeometryInfo.dstAccelerationStructure = outAs;
+
+   _, scratchGpu := GpuMalloc(
+      sizeInfo.buildScratchSize.(int),
+      vk.accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment,
+      type = .Gpu,
+      debugName = "TLAS scratch"
+   );
+   assert(scratchGpu != 0);
+   defer GpuFree(scratchGpu);
+
+   buildGeometryInfo.scratchData.deviceAddress = scratchGpu;
+
+   buildRangeInfo: VkAccelerationStructureBuildRangeInfoKHR = .{
+      primitiveCount = primitiveCount,
+      primitiveOffset = 0,
+      firstVertex = 0,
+      transformOffset = 0,
+   };
+
+   buildRangePointers := (*VkAccelerationStructureBuildRangeInfoKHR).[*buildRangeInfo];
+
+   cmd := StartCommandRecording();
+
+   GpuBarrier(
+      cmd,
+      VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+      VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR
+   );
+
+   vkCmdBuildAccelerationStructuresKHR(cmd.cmd, 1, *buildGeometryInfo, buildRangePointers.data);
+
+   if (waitTimelineValue == U64_MAX) {
+      Submit(cmd);
+   } else {
+      Submit(cmd, waitSemaphores = .[.{ vk.graphicsQueueTimelineSemaphore.semaphore, waitTimelineValue }]);
+   }
+
+   asDeviceAddressInfo: VkAccelerationStructureDeviceAddressInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+      pNext = null,
+      accelerationStructure = outAs,
+   };
+
+   asDeviceAddress := vkGetAccelerationStructureDeviceAddressKHR(vk.device, *asDeviceAddressInfo);
+   assert(asDeviceAddress != 0);
+
+   return .{
+      accelerationStructure = outAs,
+      gpuAddress = asStorageGpu,
+      deviceAddress = asDeviceAddress,
+      size = xx sizeInfo.accelerationStructureSize,
+      type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+      cmd = cmd
+   };
 }
 
 RayTracingPipeline :: struct {
-   pipeline: VkPipeline;
+   pipeline:           VkPipeline;
+   shaderGroupCount:   int;
+   raygenCount:        int;
+   missCount:          int;
+   hitGroupCount:      int;
+
+   sbtGpu:             u64;
+   sbtSize:            int;
+
+   raygenRegion:       VkStridedDeviceAddressRegionKHR;
+   missRegion:         VkStridedDeviceAddressRegionKHR;
+   hitRegion:          VkStridedDeviceAddressRegionKHR;
+   callableRegion:     VkStridedDeviceAddressRegionKHR;
 }
 
 RayHitGroup :: struct {
@@ -844,18 +1263,388 @@ RayHitGroup :: struct {
 //       - apila, 26/06/26
 //
 // maxRecursionDepth: you know the shaders you have written. ideally it is 1, you only call traceRayEXT inside the raygen shader in a loop.
+//    can be part of dynamic state. but i dont think it makes sense because from the static program you can tell what the maximum is.
+//    you gain zero information about this from the time you create the pipeline and you start to record commands. so i think better specify this at the creation time than at recording time.
+// This currently maps one acceleration structure declared as
+// `layout(set = 0, binding = 0) uniform accelerationStructureEXT ...` in every
+// raygen shader.  It deliberately avoids a shader-side ResourceHeapEXT load of
+// the acceleration structure while still sourcing its descriptor from the
+// resource heap.
 CreateRayTracingPipeline :: (raygens: [][] u8, misses: [][] u8, hitGroups: [] RayHitGroup, maxRecursionDepth: int) -> RayTracingPipeline {
-   assert(false, "not yet impelmentd!");
-   return .{};
+   assert(raygens.count > 0, "raygens.count: %", raygens.count);
+   assert(maxRecursionDepth > 0, "maxRecursionDepth: %", maxRecursionDepth);
+
+   stageCount := raygens.count + misses.count;
+   for hitGroups {
+      if (it.closestHit.count != 0) stageCount += 1;
+      if (it.anyHit.count != 0) stageCount += 1;
+      if (it.intersection.count != 0) stageCount += 1;
+   }
+
+   groupCount := raygens.count + misses.count + hitGroups.count;
+
+   stages := NewArray(stageCount, VkPipelineShaderStageCreateInfo,, temp);
+   shaderModules := NewArray(stageCount, VkShaderModule,, temp);
+   groups := NewArray(groupCount, VkRayTracingShaderGroupCreateInfoKHR,, temp);
+
+   shaderStageIndex := 0;
+   groupIndex := 0;
+
+   for raygens {
+      moduleCreateInfo: VkShaderModuleCreateInfo = .{
+         sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+         pNext = null,
+         flags = 0,
+         codeSize = xx it.count,
+         pCode = it.data.(*u32),
+      };
+
+      vkResult := vkCreateShaderModule(vk.device, *moduleCreateInfo, null, *shaderModules[shaderStageIndex]);
+      assert(vkResult == VK_SUCCESS, "vkResult: %", vkResult);
+
+      stages[shaderStageIndex] = .{
+         sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         pNext = null,
+         flags = 0,
+         stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+         module = shaderModules[shaderStageIndex],
+         pName = "main\0",
+         pSpecializationInfo = null,
+      };
+
+      groups[groupIndex] = .{
+         sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+         pNext = null,
+         type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,
+         generalShader = xx shaderStageIndex,
+         closestHitShader = VK_SHADER_UNUSED_KHR,
+         anyHitShader = VK_SHADER_UNUSED_KHR,
+         intersectionShader = VK_SHADER_UNUSED_KHR,
+         pShaderGroupCaptureReplayHandle = null,
+      };
+
+      shaderStageIndex += 1;
+      groupIndex += 1;
+   }
+
+   for misses {
+      moduleCreateInfo: VkShaderModuleCreateInfo = .{
+         sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+         pNext = null,
+         flags = 0,
+         codeSize = xx it.count,
+         pCode = it.data.(*u32),
+      };
+
+      vkResult := vkCreateShaderModule(vk.device, *moduleCreateInfo, null, *shaderModules[shaderStageIndex]);
+      assert(vkResult == VK_SUCCESS, "vkResult: %", vkResult);
+
+      stages[shaderStageIndex] = .{
+         sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         pNext = null,
+         flags = 0,
+         stage = VK_SHADER_STAGE_MISS_BIT_KHR,
+         module = shaderModules[shaderStageIndex],
+         pName = "main\0",
+         pSpecializationInfo = null,
+      };
+
+      groups[groupIndex] = .{
+         sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+         pNext = null,
+         type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,
+         generalShader = xx shaderStageIndex,
+         closestHitShader = VK_SHADER_UNUSED_KHR,
+         anyHitShader = VK_SHADER_UNUSED_KHR,
+         intersectionShader = VK_SHADER_UNUSED_KHR,
+         pShaderGroupCaptureReplayHandle = null,
+      };
+
+      shaderStageIndex += 1;
+      groupIndex += 1;
+   }
+
+   for hitGroups {
+      assert(it.closestHit.count != 0 || it.anyHit.count != 0 || it.intersection.count != 0, "at least one must be specified");
+
+      hitGroupInfo: VkRayTracingShaderGroupCreateInfoKHR = .{
+         sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+         pNext = null,
+         type = ifx it.intersection.count != 0 then VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR else VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR,
+         generalShader = VK_SHADER_UNUSED_KHR,
+         closestHitShader = VK_SHADER_UNUSED_KHR,
+         anyHitShader = VK_SHADER_UNUSED_KHR,
+         intersectionShader = VK_SHADER_UNUSED_KHR,
+         pShaderGroupCaptureReplayHandle = null,
+      };
+
+      if (it.closestHit.count != 0) {
+         moduleCreateInfo: VkShaderModuleCreateInfo = .{
+            sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            pNext = null,
+            flags = 0,
+            codeSize = xx it.closestHit.count,
+            pCode = it.closestHit.data.(*u32),
+         };
+
+         vkResult := vkCreateShaderModule(vk.device, *moduleCreateInfo, null, *shaderModules[shaderStageIndex]);
+         assert(vkResult == VK_SUCCESS, "vkResult: %", vkResult);
+
+         stages[shaderStageIndex] = .{
+            sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            pNext = null,
+            flags = 0,
+            stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
+            module = shaderModules[shaderStageIndex],
+            pName = "main\0",
+            pSpecializationInfo = null,
+         };
+
+         hitGroupInfo.closestHitShader = xx shaderStageIndex;
+         shaderStageIndex += 1;
+      }
+
+      if (it.anyHit.count != 0) {
+         moduleCreateInfo: VkShaderModuleCreateInfo = .{
+            sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            pNext = null,
+            flags = 0,
+            codeSize = xx it.anyHit.count,
+            pCode = it.anyHit.data.(*u32),
+         };
+
+         vkResult := vkCreateShaderModule(vk.device, *moduleCreateInfo, null, *shaderModules[shaderStageIndex]);
+         assert(vkResult == VK_SUCCESS, "vkResult: %", vkResult);
+
+         stages[shaderStageIndex] = .{
+            sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            pNext = null,
+            flags = 0,
+            stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+            module = shaderModules[shaderStageIndex],
+            pName = "main\0",
+            pSpecializationInfo = null,
+         };
+
+         hitGroupInfo.anyHitShader = xx shaderStageIndex;
+         shaderStageIndex += 1;
+      }
+
+      if (it.intersection.count != 0) {
+         moduleCreateInfo: VkShaderModuleCreateInfo = .{
+            sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            pNext = null,
+            flags = 0,
+            codeSize = xx it.intersection.count,
+            pCode = it.intersection.data.(*u32),
+         };
+
+         vkResult := vkCreateShaderModule(vk.device, *moduleCreateInfo, null, *shaderModules[shaderStageIndex]);
+         assert(vkResult == VK_SUCCESS, "vkResult: %", vkResult);
+
+         stages[shaderStageIndex] = .{
+            sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            pNext = null,
+            flags = 0,
+            stage = VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
+            module = shaderModules[shaderStageIndex],
+            pName = "main\0",
+            pSpecializationInfo = null,
+         };
+
+         hitGroupInfo.intersectionShader = xx shaderStageIndex;
+         shaderStageIndex += 1;
+      }
+
+      groups[groupIndex] = hitGroupInfo;
+      groupIndex += 1;
+   }
+
+   pipelineCreateFlags2CreateInfo: VkPipelineCreateFlags2CreateInfo = .{
+      sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
+      pNext = null,
+      flags = VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT
+   };
+
+   pipelineCreateInfo: VkRayTracingPipelineCreateInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+      pNext = *pipelineCreateFlags2CreateInfo,
+      flags = 0,
+      stageCount = xx stages.count,
+      pStages = stages.data,
+      groupCount = xx groups.count,
+      pGroups = groups.data,
+      maxPipelineRayRecursionDepth = xx maxRecursionDepth,
+      pLibraryInfo = null,
+      pLibraryInterface = null,
+      pDynamicState = null,
+      layout = null, // VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT
+      basePipelineHandle = null,
+      basePipelineIndex = -1,
+   };
+
+   pipeline: VkPipeline;
+   vkResult := vkCreateRayTracingPipelinesKHR(vk.device, null, null, 1, *pipelineCreateInfo, null, *pipeline);
+   assert(vkResult == VK_SUCCESS, "vkResult: %", vkResult);
+
+   for shaderModules {
+      vkDestroyShaderModule(vk.device, it, null);
+   }
+
+   shaderGroupHandleSize := vk.rayTracingPipelineProperties.shaderGroupHandleSize;
+   shaderGroupHandleAlignment := vk.rayTracingPipelineProperties.shaderGroupHandleAlignment;
+   shaderGroupBaseAlignment := vk.rayTracingPipelineProperties.shaderGroupBaseAlignment;
+
+   handleStride := Align(shaderGroupHandleSize, shaderGroupHandleAlignment);
+   raygenRecordStride := Align(handleStride, shaderGroupBaseAlignment);
+   missRecordStride := handleStride;
+   hitRecordStride := handleStride;
+
+   raygenRegionSize := raygens.count * raygenRecordStride;
+   missRegionSize := Align(misses.count * missRecordStride, shaderGroupBaseAlignment);
+   hitRegionSize := Align(hitGroups.count * hitRecordStride, shaderGroupBaseAlignment);
+
+   raygenRegionOffset := 0;
+   missRegionOffset := Align(raygenRegionOffset + raygenRegionSize, shaderGroupBaseAlignment);
+   hitRegionOffset := Align(missRegionOffset + missRegionSize, shaderGroupBaseAlignment);
+   callableRegionOffset := Align(hitRegionOffset + hitRegionSize, shaderGroupBaseAlignment);
+   callableRegionSize := 0;
+   sbtSize := callableRegionOffset + callableRegionSize;
+
+   sbtCpuUntyped, sbtGpu := GpuMalloc(sbtSize, shaderGroupBaseAlignment, debugName = "ray tracing sbt", IS_SBT = true);
+   sbtCpu := sbtCpuUntyped.(*u8);
+   assert(sbtGpu != 0);
+
+   handleStorage := NewArray(groups.count * shaderGroupHandleSize, u8,, temp);
+   vkResult = vkGetRayTracingShaderGroupHandlesKHR(vk.device, pipeline, 0, xx groups.count, xx handleStorage.count, handleStorage.data);
+   assert(vkResult == VK_SUCCESS, "vkResult: %", vkResult);
+
+   // memcpy(sbtCpu, handleStorage.data, handleStorage.count * size_of(type_of(handleStorage[0])));
+
+   for 0..raygens.count - 1 {
+      dst := sbtCpu + (raygenRegionOffset + (it * raygenRecordStride));
+      src := handleStorage.data + (it * shaderGroupHandleSize);
+      memcpy(dst, src, shaderGroupHandleSize);
+   }
+
+   missGroupStart := raygens.count;
+   for 0..misses.count - 1 {
+      dst := sbtCpu + (missRegionOffset + (it * missRecordStride));
+      src := handleStorage.data + ((missGroupStart + it) * shaderGroupHandleSize);
+      memcpy(dst, src, shaderGroupHandleSize);
+   }
+
+   hitGroupStart := raygens.count + misses.count;
+   for 0..hitGroups.count - 1 {
+      dst := sbtCpu + (hitRegionOffset + (it * hitRecordStride));
+      src := handleStorage.data + ((hitGroupStart + it) * shaderGroupHandleSize);
+      memcpy(dst, src, shaderGroupHandleSize);
+   }
+
+   raygenRegion: VkStridedDeviceAddressRegionKHR = .{
+      deviceAddress = sbtGpu + raygenRegionOffset.(u64),
+      stride = xx raygenRecordStride,
+      size = xx raygenRegionSize,
+   };
+
+   missRegion: VkStridedDeviceAddressRegionKHR = .{
+      deviceAddress = ifx misses.count == 0 then 0 else sbtGpu + missRegionOffset.(u64),
+      stride = xx missRecordStride,
+      size = xx missRegionSize,
+   };
+
+   hitRegion: VkStridedDeviceAddressRegionKHR = .{
+      deviceAddress = ifx hitGroups.count == 0 then 0 else sbtGpu + hitRegionOffset.(u64),
+      stride = xx hitRecordStride,
+      size = xx hitRegionSize,
+   };
+
+   callableRegion: VkStridedDeviceAddressRegionKHR = .{
+      deviceAddress = 0,
+      stride = 0,
+      size = 0,
+   };
+
+   return .{
+      pipeline = pipeline,
+      shaderGroupCount = groups.count,
+      raygenCount = raygens.count,
+      missCount = misses.count,
+      hitGroupCount = hitGroups.count,
+      sbtGpu = sbtGpu,
+      sbtSize = sbtSize,
+      raygenRegion = raygenRegion,
+      missRegion = missRegion,
+      hitRegion = hitRegion,
+      callableRegion = callableRegion,
+   };
 }
 
 BindRayTracingPipeline :: (cmd: *CommandBuffer, pipeline: RayTracingPipeline) {
-   assert(false, "not yet implemented!");
+   assert(pipeline.pipeline != null);
+   vkCmdBindPipeline(cmd.cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.pipeline);
 }
 
 // raygenIndex: index of the raygen given to CreateRayTracingPipeline. this function then calculates the address in the sbt.
-TraceRays :: (cmd: *CommandBuffer, pipeline: RayTracingPipeline, raygenIndex: int) {
-   assert(false, "not yet implemented!");
+TraceRays :: (cmd: *CommandBuffer, pipeline: RayTracingPipeline, raygenIndex: int, x: u32, y: u32, z: u32, rgenDataPointer: u64, rchitDataPointer: u64, rmissDataPointer: u64) {
+   assert(raygenIndex >= 0, "raygenIndex: %", raygenIndex);
+   assert(raygenIndex < pipeline.raygenCount, "raygenIndex: %, pipeline.raygenCount: %", raygenIndex, pipeline.raygenCount);
+
+   selectedRaygenRegion := pipeline.raygenRegion;
+   selectedRaygenRegion.deviceAddress += raygenIndex.(u64) * selectedRaygenRegion.stride;
+   selectedRaygenRegion.size = selectedRaygenRegion.stride;
+
+   data := u64.[
+      rgenDataPointer,
+      rchitDataPointer,
+      rmissDataPointer
+   ];
+
+   pushDataInfo: VkPushDataInfoEXT = .{
+      sType = VK_STRUCTURE_TYPE_PUSH_DATA_INFO_EXT,
+      pNext = null,
+      offset = 0,
+      data = .{ data.data, data.count * size_of(u64) }
+   };
+
+   vkCmdPushDataEXT(cmd.cmd, *pushDataInfo);
+
+   GpuBarrier(
+      cmd,
+      VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+      VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR
+   );
+
+   vkCmdTraceRaysKHR(
+      cmd.cmd,
+      *selectedRaygenRegion,
+      *pipeline.missRegion,
+      *pipeline.hitRegion,
+      *pipeline.callableRegion,
+      x,
+      y,
+      z
+   );
+}
+
+DestroyAccelerationStructure :: (as: AccelerationStructure) {
+   if (as.accelerationStructure != null) {
+      vkDestroyAccelerationStructureKHR(vk.device, as.accelerationStructure, null);
+   }
+
+   if (as.gpuAddress != 0) {
+      GpuFree(as.gpuAddress);
+   }
+}
+
+DestroyRayTracingPipeline :: (pipeline: RayTracingPipeline) {
+   if (pipeline.pipeline != null) {
+      vkDestroyPipeline(vk.device, pipeline.pipeline, null);
+   }
+
+   if (pipeline.sbtGpu != 0) {
+      GpuFree(pipeline.sbtGpu);
+   }
 }
 
 alignof :: ($T: Type) -> s64 #expand {
@@ -865,12 +1654,15 @@ alignof :: ($T: Type) -> s64 #expand {
     };
 }
 
-Align :: (value: int, alignment: int) -> int {
+Align :: (value: $T, alignment: T) -> T #modify {
+   ti := cast(*Type_Info) T;
+   return ti.type == .INTEGER, "T should be an integer lil pup";
+}{
    return (value + alignment - 1) & ~(alignment - 1);
 }
 
-GpuMalloc :: ($T: Type, count: int, type: MemoryType = .Default, debugName := "") -> cpu: [] T, gpu: u64 {
-   cpu, gpu := GpuMalloc(size_of(T) * count, alignof(T), type, debugName);
+GpuMalloc :: ($T: Type, count: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false, $IS_ACCELERATION_STRUCTURE := false, $IS_GEOMETRY := false, $IS_SBT := false) -> cpu: [] T, gpu: u64 {
+   cpu, gpu := GpuMalloc(size_of(T) * count, alignof(T), type, debugName, IS_DESCRIPTOR_HEAP, IS_ACCELERATION_STRUCTURE, IS_GEOMETRY, IS_SBT);
 
    array: [] T;
    array.count = count;
@@ -910,8 +1702,11 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
    bufferCreateInfo: VkBufferCreateInfo = .{
       sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       pNext = null,
-      size = xx size,
-      usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+      size = xx (size + alignment), // +alignment because vulkan spec has a flaw which is fixed in version 1.4.363.
+                                    // rn i have version 1.4.357. so the temporary fix is the overallocate and then align manually
+                                    // this issue is directly related to this: https://github.com/KhronosGroup/Vulkan-Docs/issues/2802
+                                    //          - apila, 01/10/26
+      usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
       sharingMode = VK_SHARING_MODE_EXCLUSIVE, // only one queue family can use this buffer at a time.
    };
 
@@ -943,6 +1738,12 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
       minAlignment = xx alignment,
    };
 
+   #if (IS_ACCELERATION_STRUCTURE) {
+      // temporary fix for https://github.com/KhronosGroup/Vulkan-Docs/issues/2802
+      //          - apila, 01/10/26
+      allocationCreateInfo.flags |= xx VmaAllocationCreateFlagBits.DEDICATED_MEMORY_BIT;
+   }
+
    outBuffer: VkBuffer;
    outVmaAllocation: VmaAllocation;
    outVmaAllocationInfo: VmaAllocationInfo;
@@ -965,12 +1766,27 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
    };
 
    gpuPointer := vkGetBufferDeviceAddress(vk.device, *addressInfo);
-    if gpuPointer == 0 {
-        vmaDestroyBuffer(vk.vmaAllocator, outBuffer, outVmaAllocation);
-        return null, 0;
-    }
+   if gpuPointer == 0 {
+       vmaDestroyBuffer(vk.vmaAllocator, outBuffer, outVmaAllocation);
+       return null, 0;
+   }
 
    cpuPointer := ifx type == .Gpu then null else outVmaAllocationInfo.pMappedData;
+
+   // temporary fix until version 1.4.363 is alive
+   // after version 1.4.363 is alive, you can get rid of over allocation temporary fix.
+   // read the comment above at bufferCreateInfo.size
+   //       - apila, 01/10/26
+   if (allocationCreateInfo.minAlignment != 0) {
+      alignedGpuPointer := Align(gpuPointer, allocationCreateInfo.minAlignment);
+      misalignment := alignedGpuPointer - gpuPointer;
+
+      if (cpuPointer != null) {
+         cpuPointer = cpuPointer.(*u8) + misalignment;
+      }
+
+      gpuPointer = alignedGpuPointer;
+   }
 
    Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
    table_add(*vk.gpuPointerToAllocationInfos, gpuPointer, .{ outBuffer, outVmaAllocation });
@@ -984,7 +1800,7 @@ GpuFree :: (gpuPointer: u64) {
    ok, allocationInfo := table_remove(*vk.gpuPointerToAllocationInfos, gpuPointer);
    Thread.unlock(*vk.gpuPointerToAllocationInfosMutex);
 
-   assert(ok, "you freed without malloc!");
+   assert(ok, "you freed without malloc! gpuPointer: %", gpuPointer);
 
    vmaDestroyBuffer(vk.vmaAllocator, allocationInfo.buffer, allocationInfo.allocation);
 }
@@ -1228,7 +2044,7 @@ AcquireSwapchainImage :: (window: *Window) {
    swapchainImageIndex: u32;
 
    vkResult := vkWaitForFences(vk.device, 1, *window.queueSubmitFences[frameIndex], xx true, U64_MAX);
-   assert(vkResult == VK_SUCCESS);
+   assert(vkResult == VK_SUCCESS, "vkResult: %", vkResult);
 
    while (true) {
       acquireImageResult := vkAcquireNextImageKHR(
@@ -1558,7 +2374,11 @@ InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSam
    vk.physicalDevice = ChoosePhysicalDevice(vk.instance);
    physicalDeviceFeatures: VkPhysicalDeviceFeatures;
 
+   vk.rayTracingPipelineProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+   vk.accelerationStructureProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+   vk.accelerationStructureProperties.pNext = *vk.rayTracingPipelineProperties;
    vk.descriptorHeapProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_PROPERTIES_EXT;
+   vk.descriptorHeapProperties.pNext = *vk.accelerationStructureProperties;
    physicalDeviceProperties2: VkPhysicalDeviceProperties2 = .{
       sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
       pNext = *vk.descriptorHeapProperties,
@@ -1593,6 +2413,7 @@ InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSam
       to_c_string(VK_KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME,, temp),
       to_c_string(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,, temp),
       to_c_string(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,, temp),
+      to_c_string(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,, temp),
       to_c_string(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,, temp),
       // VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME // promoted to core in 1.3
    ];
@@ -1657,9 +2478,15 @@ InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSam
       shaderInt64 = xx true,
    };
 
+   rayTracingPipelineFeatures: VkPhysicalDeviceRayTracingPipelineFeaturesKHR = .{
+      sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+      pNext = null,
+      rayTracingPipeline = xx true,
+   };
+
    accelerationStructureFeatures: VkPhysicalDeviceAccelerationStructureFeaturesKHR = .{
       sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
-      pNext = null,
+      pNext = *rayTracingPipelineFeatures,
       accelerationStructure = xx true,
    };
 
@@ -1825,15 +2652,23 @@ InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSam
    Thread.init(*vk.gpuPointerToAllocationInfosMutex);
 
    {
-      vk.imageDescriptorStride = Align(xx vk.descriptorHeapProperties.imageDescriptorSize, xx vk.descriptorHeapProperties.imageDescriptorAlignment);
-      vk.accelerationStructureDescriptorStride = Align(xx vk.descriptorHeapProperties.bufferDescriptorSize, xx vk.descriptorHeapProperties.bufferDescriptorAlignment);
-      vk.samplerDescriptorStride = Align(xx vk.descriptorHeapProperties.samplerDescriptorSize, xx vk.descriptorHeapProperties.samplerDescriptorAlignment);
+      vk.imageDescriptorStride = xx Align(vk.descriptorHeapProperties.imageDescriptorSize, vk.descriptorHeapProperties.imageDescriptorAlignment);
+      vk.accelerationStructureDescriptorStride = xx Align(vk.descriptorHeapProperties.bufferDescriptorSize, vk.descriptorHeapProperties.bufferDescriptorAlignment);
+      vk.samplerDescriptorStride = xx Align(vk.descriptorHeapProperties.samplerDescriptorSize, vk.descriptorHeapProperties.samplerDescriptorAlignment);
 
       vk.resourceHeapSize = xx min(vk.descriptorHeapProperties.maxResourceHeapSize, desiredResourceHeapSize + vk.descriptorHeapProperties.minResourceHeapReservedRange);
+
+      // amd drivers report maxResourceHeapSize to be U32_MAX (they dont check the ram size at all).
+      // so here i have to cap it. or idk maybe put an assert so that the user have to be provide a parameter to this function when calling it.
+      //          - apila, 01/10/26
+      assert(vk.resourceHeapSize != U32_MAX);
+
       vk.resourceHeapSize = Align(vk.resourceHeapSize, xx vk.descriptorHeapProperties.resourceHeapAlignment);
       vk.resourceHeap.cpu, vk.resourceHeap.gpu = GpuMalloc(vk.resourceHeapSize, xx vk.descriptorHeapProperties.resourceHeapAlignment, debugName = "image descriptor heap", IS_DESCRIPTOR_HEAP = true);
 
       vk.samplerHeapSize = xx min(vk.descriptorHeapProperties.maxSamplerHeapSize, desiredSamplerHeapSize + vk.descriptorHeapProperties.minSamplerHeapReservedRange);
+      assert(vk.samplerHeapSize != U32_MAX);
+
       vk.samplerHeapSize = Align(vk.samplerHeapSize, xx vk.descriptorHeapProperties.samplerHeapAlignment);
       vk.samplerHeap.cpu, vk.samplerHeap.gpu = GpuMalloc(vk.samplerHeapSize, xx vk.descriptorHeapProperties.samplerHeapAlignment, debugName = "sampler descriptor heap", IS_DESCRIPTOR_HEAP = true);
    }
@@ -2299,7 +3134,7 @@ ChoosePhysicalDevice :: (instance: VkInstance) -> VkPhysicalDevice {
       for physicalDevices {
          properties: VkPhysicalDeviceProperties;
          vkGetPhysicalDeviceProperties(it, *properties);
-         print("\t%\n", properties.deviceName);
+         print("\t%\n", to_string(properties.deviceName.data));
       }
 
       assert(false);
