@@ -2302,7 +2302,7 @@ GetDriverVersionString :: (driverVersion: u32, vendorId: u32) -> string {
       case VENDOR_ID_NVIDIA;
          print_to_builder(*sb, "%.%.%.%", driverVersion >> 22, (driverVersion >> 14) & 0xFF, (driverVersion >> 6) & 0xFF, driverVersion & 0x3F);
       case;
-         print_to_builder(*sb, "%.%.%", driverVersion >> 22, (driverVersion >> 12) & 0x3FF, (driverVersion >> 6) & 0xFFF);
+         print_to_builder(*sb, "%.%.%", driverVersion >> 22, (driverVersion >> 12) & 0x3FF, driverVersion & 0xFFF);
    }
 
    return builder_to_string(*sb);
