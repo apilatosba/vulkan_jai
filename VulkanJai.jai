@@ -1308,7 +1308,7 @@ CreateRayTracingPipeline :: (raygens: [][] u8, misses: [][] u8, hitGroups: [] Ra
          flags = 0,
          stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
          module = shaderModules[shaderStageIndex],
-         pName = "main\0",
+         pName = "ApilaRgen\0",
          pSpecializationInfo = null,
       };
 
@@ -1345,7 +1345,7 @@ CreateRayTracingPipeline :: (raygens: [][] u8, misses: [][] u8, hitGroups: [] Ra
          flags = 0,
          stage = VK_SHADER_STAGE_MISS_BIT_KHR,
          module = shaderModules[shaderStageIndex],
-         pName = "main\0",
+         pName = "ApilaRmiss\0",
          pSpecializationInfo = null,
       };
 
@@ -1396,7 +1396,7 @@ CreateRayTracingPipeline :: (raygens: [][] u8, misses: [][] u8, hitGroups: [] Ra
             flags = 0,
             stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
             module = shaderModules[shaderStageIndex],
-            pName = "main\0",
+            pName = "ApilaRchit\0",
             pSpecializationInfo = null,
          };
 
