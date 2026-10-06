@@ -3114,6 +3114,65 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
    return result;
 }
 
+// must be called only once per frame per window
+UpdateInput :: (window: *Window) {
+   glfwPollEvents();
+
+   window.input.mouse.positionLastFrame = window.input.mouse.position;
+   window.input.mouse.wheel = 0;
+   Clear(*window.input.keyboard.characterQueue);
+   memset(*window.input.keyboard.pressedKeys, 0, window.input.keyboard.pressedKeys.count * size_of(type_of(window.input.keyboard.pressedKeys[0])));
+   memset(*window.input.keyboard.releasedKeys, 0, window.input.keyboard.releasedKeys.count * size_of(type_of(window.input.keyboard.releasedKeys[0])));
+   memset(*window.input.mouse.buttonsPressed, 0, window.input.mouse.buttonsPressed.count * size_of(type_of(window.input.mouse.buttonsPressed[0])));
+   memset(*window.input.mouse.buttonsReleased, 0, window.input.mouse.buttonsReleased.count * size_of(type_of(window.input.mouse.buttonsReleased[0])));
+
+   while (true) {
+      success, polledEvent:= Dequeue(*window.polledEventsQueue);
+      if (!success) break;
+
+      if #complete polledEvent.type == {
+         case .Key; {
+            if (polledEvent.key.action == GLFW_PRESS) {
+               window.input.keyboard.pressedKeys[polledEvent.key.key] += 1;
+               window.input.keyboard.keysDown[polledEvent.key.key] = true;
+            } else if (polledEvent.key.action == GLFW_RELEASE) {
+               window.input.keyboard.releasedKeys[polledEvent.key.key] += 1;
+               window.input.keyboard.keysDown[polledEvent.key.key] = false;
+            }
+         }
+
+         case .MouseButton; {
+            if (polledEvent.mouseButton.action == GLFW_PRESS) {
+               window.input.mouse.buttonsPressed[polledEvent.mouseButton.button] += 1;
+               window.input.mouse.buttonsDown[polledEvent.mouseButton.button] = true;
+            } else if (polledEvent.mouseButton.action == GLFW_RELEASE) {
+               window.input.mouse.buttonsReleased[polledEvent.mouseButton.button] += 1;
+               window.input.mouse.buttonsDown[polledEvent.mouseButton.button] = false;
+            }
+         }
+
+         case .CursorPosition; {
+            window.input.mouse.position = polledEvent.cursorPosition;
+         }
+
+         case .Scroll; {
+            window.input.mouse.wheel += polledEvent.scroll.yOffset;
+         }
+
+         case .None; assert(false, "polled event type was none.");
+         case; assert(false, "switch case should be exhaustive. polledEvent.type: %", polledEvent.type);
+      }
+   }
+}
+
+IsKeyDown :: (window: *Window, key: KeyboardKey) -> bool {
+   return window.input.keyboard.keysDown[key];
+}
+
+IsKeyPressed :: (window: *Window, key: KeyboardKey) -> bool {
+   return window.input.keyboard.pressedKeys[key] > 0;
+}
+
 ChoosePhysicalDevice :: (instance: VkInstance) -> VkPhysicalDevice {
    assert(instance != null);
 
