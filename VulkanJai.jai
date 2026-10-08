@@ -1586,7 +1586,7 @@ BindRayTracingPipeline :: (cmd: *CommandBuffer, pipeline: RayTracingPipeline) {
 }
 
 // raygenIndex: index of the raygen given to CreateRayTracingPipeline. this function then calculates the address in the sbt.
-TraceRays :: (cmd: *CommandBuffer, pipeline: RayTracingPipeline, raygenIndex: int, x: u32, y: u32, z: u32, rgenDataPointer: u64, rchitDataPointer: u64, rmissDataPointer: u64) {
+TraceRays :: (cmd: *CommandBuffer, pipeline: RayTracingPipeline, raygenIndex: int, x: u32, y: u32, z: u32, rgenDataPointer: u64, rchitDataPointer: u64, rmissDataPointer: u64, rahitDataPointer: u64, rintDataPointer: u64, rcallDataPointer: u64) {
    assert(raygenIndex >= 0, "raygenIndex: %", raygenIndex);
    assert(raygenIndex < pipeline.raygenCount, "raygenIndex: %, pipeline.raygenCount: %", raygenIndex, pipeline.raygenCount);
 
@@ -1594,10 +1594,15 @@ TraceRays :: (cmd: *CommandBuffer, pipeline: RayTracingPipeline, raygenIndex: in
    selectedRaygenRegion.deviceAddress += raygenIndex.(u64) * selectedRaygenRegion.stride;
    selectedRaygenRegion.size = selectedRaygenRegion.stride;
 
+   // this must match RtxPipelinePushData in ApilaSpirv.
+   //          - apila, 08/10/26
    data := u64.[
       rgenDataPointer,
       rchitDataPointer,
-      rmissDataPointer
+      rmissDataPointer,
+      rahitDataPointer,
+      rintDataPointer,
+      rcallDataPointer
    ];
 
    pushDataInfo: VkPushDataInfoEXT = .{
