@@ -58,7 +58,7 @@ KeyboardState :: struct {
    releasedKeys:     [MAX_KEY_COUNT] u8;
    characterQueue:   Queue(u32);
 
-   MAX_KEY_COUNT :: 256;
+   MAX_KEY_COUNT :: 512;
 }
 
 MouseState :: struct {
@@ -727,7 +727,7 @@ WriteSamplerDescriptors :: (startIndex: int, descriptors: [] SamplerInfo) {
          addressModeW = it.addressModeW,
          mipLodBias = 0,
          anisotropyEnable = xx it.anisotropyEnable,
-         maxAnisotropy = max(it.maxAnisotropy, vk.physicalDeviceProperties.limits.maxSamplerAnisotropy),
+         maxAnisotropy = min(it.maxAnisotropy, vk.physicalDeviceProperties.limits.maxSamplerAnisotropy),
          compareEnable = xx false,
          compareOp = VK_COMPARE_OP_ALWAYS,
          minLod = 0,
@@ -937,7 +937,6 @@ BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
 
    transforms := NewArray(geometries.count, VkTransformMatrixKHR,, temp);
    transformCpu, transformGpu := GpuMalloc(size_of(VkTransformMatrixKHR) * geometries.count, 16, debugName = "BuildBLAS transforms", IS_GEOMETRY = true);
-   defer GpuFree(transformGpu);
 
    for geometries {
       assert(it.vertexCount > 0, "vertexCount: %", it.vertexCount);
@@ -1040,7 +1039,6 @@ BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
       debugName = "BLAS scratch"
    );
    assert(scratchGpu != 0);
-   defer GpuFree(scratchGpu);
 
    buildGeometryInfo.scratchData.deviceAddress = scratchGpu;
 
@@ -1049,6 +1047,10 @@ BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
    cmd := StartCommandRecording();
    vkCmdBuildAccelerationStructuresKHR(cmd.cmd, 1, *buildGeometryInfo, buildRangePointers.data);
    Submit(cmd);
+
+   // freeing the buffers after the vkCmdBuildAccelerationStructuresKHR finishes executing
+   DispatchFunction(WaitAndFree, scratchGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
+   DispatchFunction(WaitAndFree, transformGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
 
    asDeviceAddressInfo: VkAccelerationStructureDeviceAddressInfoKHR = .{
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
@@ -1069,6 +1071,22 @@ BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
    };
 }
 
+WaitAndFree :: (gpuAddress: u64, semaphore: Semaphore) {
+   info: VkSemaphoreWaitInfo = .{
+      sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+      pNext = null,
+      flags = 0,
+      semaphoreCount = 1,
+      pSemaphores = *semaphore.semaphore,
+      pValues = *semaphore.value,
+   };
+
+   result := vkWaitSemaphores(vk.device, *info, U64_MAX);
+   assert(result == VK_SUCCESS, "result: %", result);
+
+   GpuFree(gpuAddress);
+}
+
 InstanceInfo :: struct {
    blasReference:    AccelerationStructure;
    modelMatrix:      VkTransformMatrixKHR;
@@ -1084,7 +1102,6 @@ BuildTLAS :: (instances: [] InstanceInfo, waitTimelineValue: u64) -> Acceleratio
 
    instanceDatas := NewArray(instances.count, VkAccelerationStructureInstanceKHR);
    instanceDataCpuUntyped, instanceDataGpu := GpuMalloc(size_of(VkAccelerationStructureInstanceKHR) * instances.count, 16, debugName = "TLAS instances", IS_GEOMETRY = true);
-   defer GpuFree(instanceDataGpu);
 
    instanceDataCpu := instanceDataCpuUntyped.(*VkAccelerationStructureInstanceKHR);
 
@@ -1185,7 +1202,6 @@ BuildTLAS :: (instances: [] InstanceInfo, waitTimelineValue: u64) -> Acceleratio
       debugName = "TLAS scratch"
    );
    assert(scratchGpu != 0);
-   defer GpuFree(scratchGpu);
 
    buildGeometryInfo.scratchData.deviceAddress = scratchGpu;
 
@@ -1213,6 +1229,10 @@ BuildTLAS :: (instances: [] InstanceInfo, waitTimelineValue: u64) -> Acceleratio
    } else {
       Submit(cmd, waitSemaphores = .[.{ vk.graphicsQueueTimelineSemaphore.semaphore, waitTimelineValue }]);
    }
+
+   // freeing the buffers after the vkCmdBuildAccelerationStructuresKHR finishes executing
+   DispatchFunction(WaitAndFree, instanceDataGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
+   DispatchFunction(WaitAndFree, scratchGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
 
    asDeviceAddressInfo: VkAccelerationStructureDeviceAddressInfoKHR = .{
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
@@ -1422,7 +1442,7 @@ CreateRayTracingPipeline :: (raygens: [][] u8, misses: [][] u8, hitGroups: [] Ra
             flags = 0,
             stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
             module = shaderModules[shaderStageIndex],
-            pName = "main\0",
+            pName = "ApilaRahit\0",
             pSpecializationInfo = null,
          };
 
@@ -1448,7 +1468,7 @@ CreateRayTracingPipeline :: (raygens: [][] u8, misses: [][] u8, hitGroups: [] Ra
             flags = 0,
             stage = VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
             module = shaderModules[shaderStageIndex],
-            pName = "main\0",
+            pName = "ApilaRint\0",
             pSpecializationInfo = null,
          };
 
@@ -2064,6 +2084,8 @@ AcquireSwapchainImage :: (window: *Window) {
       if (acquireImageResult == VK_ERROR_OUT_OF_DATE_KHR) {
          RecreateSwapchain(window);
          continue;
+      } else if (acquireImageResult == VK_SUBOPTIMAL_KHR) {
+         window.isFramebufferResized = true;
       } else {
          assert(acquireImageResult == VK_SUCCESS);
       }

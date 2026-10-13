@@ -6,18 +6,13 @@
 #import "Hash_Table";
 #import "ApilaDispatch";
 
-MyStruct :: struct {
-   x: int = 69;
-   y: int = 420;
-}
-
 #run {
    set_build_options_dc(.{ do_output = false });
 
-   a :: int;
-   b :: #type int;
-   assert(a == b);
+   a: u32 = U32_MAX;
+   b: u64 = 10;
 
-   print("%\n", a);
-   print("%\n", b);
+   c := a + b;
+
+   print("type: %, value: %\n", type_of(c), c);
 }
