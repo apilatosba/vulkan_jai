@@ -16,7 +16,7 @@ Thread :: #import "Thread";
 #scope_file
 // i couldn get bindings generator to generate bindings for this function (you need to include vulkan headers and bla bla)
 // so i manually add it here
-libglfw :: #library "modules/glfw/source/build/src/libglfw";
+libglfw :: #library "../glfw/linux/libglfw";
 glfwCreateWindowSurface :: (instance: VkInstance, window: *GLFWwindow, allocator: *VkAllocationCallbacks, surface: *VkSurfaceKHR) -> VkResult #foreign libglfw;
 #scope_export
 
@@ -411,9 +411,9 @@ GpuBarrier :: (cmd: *CommandBuffer, before: VkPipelineStageFlagBits2, after: VkP
       sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
       pNext = null,
       srcStageMask = before,
-      srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+      srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
       dstStageMask = after,
-      dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+      dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
    };
 
    dependencyInfo: VkDependencyInfo = .{
@@ -1798,20 +1798,25 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
 
    cpuPointer := ifx type == .Gpu then null else outVmaAllocationInfo.pMappedData;
 
+   // removing this temp fix because it causes other issues like the underlying VkBuffer and does not start at the returned device address.
+   // removing this temp fix causes validation errors but the program doesnt crash so this will be state until radv implements the spec version 1.4.363
+   // right now they are at 1.4.354
+   //       - apila, 15/10/26
+   //
    // temporary fix until version 1.4.363 is alive
    // after version 1.4.363 is alive, you can get rid of over allocation temporary fix.
    // read the comment above at bufferCreateInfo.size
    //       - apila, 01/10/26
-   if (allocationCreateInfo.minAlignment != 0) {
-      alignedGpuPointer := Align(gpuPointer, allocationCreateInfo.minAlignment);
-      misalignment := alignedGpuPointer - gpuPointer;
+   // if (allocationCreateInfo.minAlignment != 0) {
+   //    alignedGpuPointer := Align(gpuPointer, allocationCreateInfo.minAlignment);
+   //    misalignment := alignedGpuPointer - gpuPointer;
 
-      if (cpuPointer != null) {
-         cpuPointer = cpuPointer.(*u8) + misalignment;
-      }
+   //    if (cpuPointer != null) {
+   //       cpuPointer = cpuPointer.(*u8) + misalignment;
+   //    }
 
-      gpuPointer = alignedGpuPointer;
-   }
+   //    gpuPointer = alignedGpuPointer;
+   // }
 
    Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
    table_add(*vk.gpuPointerToAllocationInfos, gpuPointer, .{ outBuffer, outVmaAllocation });
