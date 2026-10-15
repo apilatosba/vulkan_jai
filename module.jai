@@ -2401,11 +2401,20 @@ GetDriverVersionString :: (driverVersion: u32, vendorId: u32) -> string {
    return builder_to_string(*sb);
 }
 
+InitializationSettings :: struct {
+   desiredResourceHeapSize:   u32      = 64 * 1024; // 64 kb for no reason. i thought it was a good default Clueless
+   desiredSamplerHeapSize:    u32      = 64 * 1024; // 64 kb for no reason. i thought it was a good default Clueless
+   enableValidationLayers:    bool     = true;
+   windowWidth:               int      = 640;
+   windowHeight:              int      = 480;
+   windowTitle:               string   = "kayu";
+}
+
 // resource heap max size is 32MB on my machine (driver reserved range included).
 // sampler heap max size is 128KB on my machine (driver reserved range included).
 // since they are not too much by default i set the desired count U32_MAX, which then will be clamped
 //          - apila, 26/06/26
-InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSamplerHeapSize: u32 = U32_MAX) -> *Window {
+InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
    #if OS == .LINUX {
       vulkan := dlopen("libvulkan.so.1", RTLD_LAZY);
       assert(vulkan != null);
@@ -2414,7 +2423,9 @@ InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSam
       #assert false;
    }
 
-   assert(IsValidationLayerSupported());
+   if (settings.enableValidationLayers) {
+      assert(IsValidationLayerSupported(), "enableValidationLayers is set but VK_LAYER_KHRONOS_validation is not installed");
+   }
 
    if (glfwInit() == 0) {
       print("failed to initialize glfw\n");
@@ -2448,14 +2459,19 @@ InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSam
       instanceExtensionsToEnable[it] = requiredExtensionsByGlfw[it - 1];
    }
 
-   layersToEnable := *u8.["VK_LAYER_KHRONOS_validation\0"];
+   validationLayers := *u8.["VK_LAYER_KHRONOS_validation\0"];
+   layersToEnable: [] *u8;
+   if (settings.enableValidationLayers) {
+      layersToEnable = validationLayers;
+   }
+
    instanceCreateInfo: VkInstanceCreateInfo = .{
       sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
       pNext = null,
       pApplicationInfo = *applicationInfo,
       enabledExtensionCount = xx instanceExtensionsToEnable.count,
       ppEnabledExtensionNames = instanceExtensionsToEnable.data,
-      enabledLayerCount = layersToEnable.count,
+      enabledLayerCount = xx layersToEnable.count,
       ppEnabledLayerNames = layersToEnable.data,
    };
 
@@ -2508,6 +2524,7 @@ InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSam
       to_c_string(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,, temp),
       to_c_string(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,, temp),
       to_c_string(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,, temp),
+      to_c_string(VK_KHR_RAY_QUERY_EXTENSION_NAME,, temp),
       // VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME // promoted to core in 1.3
    ];
 
@@ -2531,7 +2548,7 @@ InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSam
    queueFamilyProperties.data = temporary_alloc(queueFamilyCount * size_of(VkQueueFamilyProperties)); // jai doesnt allow to allocate on the stack
    vkGetPhysicalDeviceQueueFamilyProperties(vk.physicalDevice, *queueFamilyCount, queueFamilyProperties.data);
 
-   window := CreateWindowThePartBeforeDeviceCreation(640, 480, "kayu4");
+   window := CreateWindowThePartBeforeDeviceCreation(settings.windowWidth, settings.windowHeight, settings.windowTitle);
 
    for 0..queueFamilyCount - 1 {
       graphicsSupport := false;
@@ -2571,9 +2588,15 @@ InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSam
       shaderInt64 = xx true,
    };
 
+   rayQueryFeatures: VkPhysicalDeviceRayQueryFeaturesKHR = .{
+      sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+      pNext = null,
+      rayQuery = xx true,
+   };
+
    rayTracingPipelineFeatures: VkPhysicalDeviceRayTracingPipelineFeaturesKHR = .{
       sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
-      pNext = null,
+      pNext = *rayQueryFeatures,
       rayTracingPipeline = xx true,
    };
 
@@ -2749,7 +2772,7 @@ InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSam
       vk.accelerationStructureDescriptorStride = xx Align(vk.descriptorHeapProperties.bufferDescriptorSize, vk.descriptorHeapProperties.bufferDescriptorAlignment);
       vk.samplerDescriptorStride = xx Align(vk.descriptorHeapProperties.samplerDescriptorSize, vk.descriptorHeapProperties.samplerDescriptorAlignment);
 
-      vk.resourceHeapSize = xx min(vk.descriptorHeapProperties.maxResourceHeapSize, desiredResourceHeapSize + vk.descriptorHeapProperties.minResourceHeapReservedRange);
+      vk.resourceHeapSize = xx min(vk.descriptorHeapProperties.maxResourceHeapSize, settings.desiredResourceHeapSize + vk.descriptorHeapProperties.minResourceHeapReservedRange);
 
       // amd drivers report maxResourceHeapSize to be U32_MAX (they dont check the ram size at all).
       // so here i have to cap it. or idk maybe put an assert so that the user have to be provide a parameter to this function when calling it.
@@ -2759,7 +2782,7 @@ InitializeVulkanAndWindow :: (desiredResourceHeapSize: u32 = U32_MAX, desiredSam
       vk.resourceHeapSize = Align(vk.resourceHeapSize, xx vk.descriptorHeapProperties.resourceHeapAlignment);
       vk.resourceHeap.cpu, vk.resourceHeap.gpu = GpuMalloc(vk.resourceHeapSize, xx vk.descriptorHeapProperties.resourceHeapAlignment, debugName = "image descriptor heap", IS_DESCRIPTOR_HEAP = true);
 
-      vk.samplerHeapSize = xx min(vk.descriptorHeapProperties.maxSamplerHeapSize, desiredSamplerHeapSize + vk.descriptorHeapProperties.minSamplerHeapReservedRange);
+      vk.samplerHeapSize = xx min(vk.descriptorHeapProperties.maxSamplerHeapSize, settings.desiredSamplerHeapSize + vk.descriptorHeapProperties.minSamplerHeapReservedRange);
       assert(vk.samplerHeapSize != U32_MAX);
 
       vk.samplerHeapSize = Align(vk.samplerHeapSize, xx vk.descriptorHeapProperties.samplerHeapAlignment);
