@@ -378,6 +378,10 @@ MeshletPipeline :: struct {
    fragment:   VkShaderEXT;
 }
 
+ComputePipeline :: struct {
+   compute:    VkShaderEXT;
+}
+
 MemoryType :: enum {
    Default  :: 0; // cpu visible
    Gpu      :: 1; // not cpu visible (even if it is, cpu says it will not read nor write to the memory)
@@ -1939,6 +1943,63 @@ DestroyMeshletPipeline :: (using pipeline: MeshletPipeline) {
 
    vkDestroyShaderEXT(vk.device, mesh, null);
    vkDestroyShaderEXT(vk.device, fragment, null);
+}
+
+CreateComputePipeline :: (spirv: [] u8, debugName := "", entryPointName := "ApilaCS") -> ComputePipeline {
+   createInfo: VkShaderCreateInfoEXT = .{
+      sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
+      pNext = null,
+      flags = VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT,
+      stage = VK_SHADER_STAGE_COMPUTE_BIT,
+      nextStage = 0,
+      codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+      codeSize = xx spirv.count,
+      pCode = spirv.data,
+      pName = to_c_string(entryPointName,, temp),
+      setLayoutCount = 0, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+      pSetLayouts = null, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+      pushConstantRangeCount = 0, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+      pPushConstantRanges = null, // VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT
+   };
+
+   compute: VkShaderEXT;
+   vkResult := vkCreateShadersEXT(vk.device, 1, *createInfo, null, *compute);
+   assert(vkResult == VK_SUCCESS, "vkResult: %", vkResult);
+
+   if (debugName.count != 0) {
+      vkResult = VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_SHADER_EXT, xx compute, tprint("%[compute]", debugName));
+      assert(vkResult == VK_SUCCESS);
+   }
+
+   return .{ compute };
+}
+
+BindComputePipeline :: (cmd: *CommandBuffer, pipeline: ComputePipeline) {
+   stage: VkShaderStageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+   vkCmdBindShadersEXT(cmd.cmd, 1, *stage, *pipeline.compute);
+}
+
+DispatchCompute :: (cmd: *CommandBuffer, computeDataPointer: u64, x: u32, y: u32, z: u32) {
+   // this must match ComputePipelinePushData in ApilaSpirv.
+   data := u64.[
+      computeDataPointer
+   ];
+
+   pushDataInfo: VkPushDataInfoEXT = .{
+      sType = VK_STRUCTURE_TYPE_PUSH_DATA_INFO_EXT,
+      pNext = null,
+      offset = 0,
+      data = .{ data.data, data.count * size_of(u64) }
+   };
+
+   vkCmdPushDataEXT(cmd.cmd, *pushDataInfo);
+   vkCmdDispatch(cmd.cmd, x, y, z);
+}
+
+DestroyComputePipeline :: (pipeline: ComputePipeline) {
+   if (pipeline.compute != null) {
+      vkDestroyShaderEXT(vk.device, pipeline.compute, null);
+   }
 }
 
 GetImageViewFromRenderPassAttachmentInfo :: (info: RenderPassAttachmentInfo) -> VkImageView {
