@@ -2406,6 +2406,16 @@ InitializationSettings :: struct {
    windowWidth:               int      = 640;
    windowHeight:              int      = 480;
    windowTitle:               string   = "kayu";
+   isWindowVisible:           bool     = true;
+}
+
+// time since initialization
+GetTime :: () -> float64 {
+   return glfwGetTime();
+}
+
+WindowShouldClose :: (window: *Window) -> bool {
+   return xx glfwWindowShouldClose(window.window);
 }
 
 // resource heap max size is 32MB on my machine (driver reserved range included).
@@ -2430,6 +2440,7 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       exit(69);
    }
 
+   glfwWindowHint(GLFW_VISIBLE, xx ifx settings.isWindowVisible then GLFW_TRUE else GLFW_FALSE);
    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
    // cant inline because of #c_call
    GlfwErrorCallback :: (errorCode: s32, description: *u8) #c_call {
