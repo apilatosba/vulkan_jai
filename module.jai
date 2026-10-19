@@ -1791,12 +1791,6 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
       minAlignment = xx alignment,
    };
 
-   #if (IS_ACCELERATION_STRUCTURE) {
-      // temporary fix for https://github.com/KhronosGroup/Vulkan-Docs/issues/2802
-      //          - apila, 01/10/26
-      allocationCreateInfo.flags |= xx VmaAllocationCreateFlagBits.DEDICATED_MEMORY_BIT;
-   }
-
    outBuffer: VkBuffer;
    outVmaAllocation: VmaAllocation;
    outVmaAllocationInfo: VmaAllocationInfo;
@@ -1825,26 +1819,6 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
    }
 
    cpuPointer := ifx type == .Gpu then null else outVmaAllocationInfo.pMappedData;
-
-   // removing this temp fix because it causes other issues like the underlying VkBuffer and does not start at the returned device address.
-   // removing this temp fix causes validation errors but the program doesnt crash so this will be state until radv implements the spec version 1.4.363
-   // right now they are at 1.4.354
-   //       - apila, 15/10/26
-   //
-   // temporary fix until version 1.4.363 is alive
-   // after version 1.4.363 is alive, you can get rid of over allocation temporary fix.
-   // read the comment above at bufferCreateInfo.size
-   //       - apila, 01/10/26
-   // if (allocationCreateInfo.minAlignment != 0) {
-   //    alignedGpuPointer := Align(gpuPointer, allocationCreateInfo.minAlignment);
-   //    misalignment := alignedGpuPointer - gpuPointer;
-
-   //    if (cpuPointer != null) {
-   //       cpuPointer = cpuPointer.(*u8) + misalignment;
-   //    }
-
-   //    gpuPointer = alignedGpuPointer;
-   // }
 
    Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
    table_add(*vk.gpuPointerToAllocationInfos, gpuPointer, .{ outBuffer, outVmaAllocation });
