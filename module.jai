@@ -488,14 +488,40 @@ BlitImage :: (cmd: *CommandBuffer, source: Image, destination: Image, sourceMip:
    vkCmdBlitImage2(cmd.cmd, *blitInfo);
 }
 
-// source is a gpu pointer
-CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image) {
+GetAllocationInfo :: (address: u64) -> AllocationInfo #expand {
    Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
-   ok, allocationInfo := table_find(*vk.gpuPointerToAllocationInfos, source);
+   ok, allocationInfo := table_find(*vk.gpuPointerToAllocationInfos, address);
    Thread.unlock(*vk.gpuPointerToAllocationInfosMutex);
 
-   assert(ok, "you tried to copy from a gpu pointer that was not allocated by GpuMalloc");
+   assert(ok, "the gpu pointer was not allocated by GpuMalloc. address: %", address);
+   return allocationInfo;
+}
 
+CopyImageToBuffer :: (cmd: *CommandBuffer, source: Image, destination: u64) {
+   region: VkBufferImageCopy = .{
+      bufferOffset = 0,
+      bufferRowLength = 0,
+      bufferImageHeight = 0,
+      imageSubresource = .{
+         aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         mipLevel = 0,
+         baseArrayLayer = 0,
+         layerCount = source.description.arrayLayers,
+      },
+      imageOffset = .{ 0, 0, 0 },
+      imageExtent = .{
+         source.description.size[0],
+         source.description.size[1],
+         source.description.size[2],
+      },
+   };
+
+   allocationInfo := GetAllocationInfo(destination);
+   vkCmdCopyImageToBuffer(cmd.cmd, source.image, VK_IMAGE_LAYOUT_GENERAL, allocationInfo.buffer, 1, *region);
+}
+
+// source is a gpu pointer
+CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image) {
    region: VkBufferImageCopy = .{
       bufferOffset = 0,
       bufferRowLength = 0,
@@ -514,6 +540,7 @@ CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image) {
       },
    };
 
+   allocationInfo := GetAllocationInfo(source);
    vkCmdCopyBufferToImage(cmd.cmd, allocationInfo.buffer, destination.image, VK_IMAGE_LAYOUT_GENERAL, 1, *region);
 }
 
@@ -624,12 +651,15 @@ CreateImageViewOverEntireImage :: (image: VkImage, description: ImageDescription
    return outImageView;
 }
 
-CreateImage :: (gpuPointer: u64, description: ImageDescription, debugName := "") -> Image {
-   Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
-   ok, allocationInfo := table_find(*vk.gpuPointerToAllocationInfos, gpuPointer);
-   Thread.unlock(*vk.gpuPointerToAllocationInfosMutex);
+// destroys whatever CreateImage has created.
+// this doesnt free the buffer, you need to call GpuFree for that
+DestroyImage :: (image: Image) {
+   vkDestroyImageView(vk.device, image.view, null);
+   vkDestroyImage(image.image);
+}
 
-   assert(ok, "you tried to create an image over a memory that was not allocated with GpuMalloc");
+CreateImage :: (gpuPointer: u64, description: ImageDescription, debugName := "") -> Image {
+   allocationInfo := GetAllocationInfo(gpuPointer);
 
    imageCreateInfo := ImageDescriptionToVkImageCreateInfo(description);
    outImage: VkImage;
@@ -1014,10 +1044,7 @@ BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
    );
    assert(asStorageGpu != 0);
 
-   Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
-   okAsStorage, asStorageAllocationInfo := table_find(*vk.gpuPointerToAllocationInfos, asStorageGpu);
-   Thread.unlock(*vk.gpuPointerToAllocationInfosMutex);
-   assert(okAsStorage);
+   asStorageAllocationInfo := GetAllocationInfo(asStorageGpu);
 
    asCreateInfo: VkAccelerationStructureCreateInfoKHR = .{
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
@@ -1177,10 +1204,7 @@ BuildTLAS :: (instances: [] InstanceInfo, waitTimelineValue: u64) -> Acceleratio
    );
    assert(asStorageGpu != 0);
 
-   Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
-   okAsStorage, asStorageAllocationInfo := table_find(*vk.gpuPointerToAllocationInfos, asStorageGpu);
-   Thread.unlock(*vk.gpuPointerToAllocationInfosMutex);
-   assert(okAsStorage);
+   asStorageAllocationInfo := GetAllocationInfo(asStorageGpu);
 
    asCreateInfo: VkAccelerationStructureCreateInfoKHR = .{
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
