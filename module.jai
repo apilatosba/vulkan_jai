@@ -651,11 +651,22 @@ CreateImageViewOverEntireImage :: (image: VkImage, description: ImageDescription
    return outImageView;
 }
 
+CursorMode :: enum #specified {
+   Normal      :: GLFW_CURSOR_NORMAL;
+   Hidden      :: GLFW_CURSOR_HIDDEN;
+   Disabled    :: GLFW_CURSOR_DISABLED;
+   Captured    :: GLFW_CURSOR_CAPTURED;
+}
+
+SetCursorMode :: (window: *Window, mode: CursorMode) {
+   glfwSetInputMode(window.window, GLFW_CURSOR, xx mode);
+}
+
 // destroys whatever CreateImage has created.
 // this doesnt free the buffer, you need to call GpuFree for that
 DestroyImage :: (image: Image) {
    vkDestroyImageView(vk.device, image.view, null);
-   vkDestroyImage(image.image);
+   vkDestroyImage(vk.device, image.image, null);
 }
 
 CreateImage :: (gpuPointer: u64, description: ImageDescription, debugName := "") -> Image {
@@ -2118,6 +2129,11 @@ EndRenderPass :: (cmd: *CommandBuffer) {
    vkCmdEndRendering(cmd.cmd);
 }
 
+// index for per frame buffers.
+GetFrameIndex :: (window: *Window) -> int #expand {
+   return window.cpuFrameTimeline % window.swapchainImages.count;
+}
+
 // outputs to window.swapchainImageIndex
 AcquireSwapchainImage :: (window: *Window) {
    window.cpuFrameTimeline += 1;
@@ -2129,7 +2145,7 @@ AcquireSwapchainImage :: (window: *Window) {
    // or at the end of the frame. right now i do it at the start of the frame in this function
    //
 
-   frameIndex := window.cpuFrameTimeline % window.acquireImageSemaphores.count;
+   frameIndex := GetFrameIndex(window);
    swapchainImageIndex: u32;
 
    vkResult := vkWaitForFences(vk.device, 1, *window.queueSubmitFences[frameIndex], xx true, U64_MAX);
@@ -2255,7 +2271,7 @@ StartCommandRecording :: () -> *CommandBuffer {
 // but this ugly ass design comes from the ugly ass design of vulkan swapchain and their special
 // synchronization designs. so it is okay
 SubmitAndPresent :: (cmd: *CommandBuffer, window: *Window) {
-   frameIndex := window.cpuFrameTimeline % window.swapchainImages.count;
+   frameIndex := GetFrameIndex(window);
 
    // transition layout to present
    {
