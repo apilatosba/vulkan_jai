@@ -844,6 +844,19 @@ ImageDescriptorType :: enum #specified {
 //
 // usage idea in game engine: use StableIndexArray to store your image descriptors
 // so it works out of the box with deleting/adding new images. for example when you load a new scene
+//
+//
+// change in design:
+// the library will be responsible for managing the descriptors. so i need a heap allocator in the library that will return the offset when it writes descriptors (rather than taking it as a parameter).
+// why i need this is that, i wanted to integrate imgui, but imgui also needs to upload images, so imgui and your game needs to agree on something. which means you either need to complicate
+// the imgui backend, so that it understand your images and doesnt corrupt them, and vice versa your game needs to be aware of imgui images so your game doesnt corrupt imgui images.
+// which is a nightmare. there are two solutions:
+//    - let the user create multiple descriptor heaps. imgui and the game would simply use seperate heaps.
+//    - let the library handle descriptor allocations.
+//
+// since the idea of descriptor heaps is to kind of have only one for your entire program, i lean towards to the second one. it is also easier for your game to use the library.
+// because a game only cares about a handle to the image, it doesnt care where/how it ends up in the heap or what its alignment must be. so i think second solution is a clear winner here.
+//          - apila, 22/10/26
 WriteImageDescriptors :: (startOffset: int, descriptors: [] Image, type: ImageDescriptorType) {
    resourceDescriptorInfos := NewArray(descriptors.count, VkResourceDescriptorInfoEXT,, temp);
    hostAddressRanges := NewArray(descriptors.count, VkHostAddressRangeEXT,, temp);
@@ -896,6 +909,24 @@ WriteImageDescriptors :: (startOffset: int, descriptors: [] Image, type: ImageDe
 
    vkResult := vkWriteResourceDescriptorsEXT(vk.device, xx resourceDescriptorInfos.count, resourceDescriptorInfos.data, hostAddressRanges.data);
    assert(vkResult == VK_SUCCESS);
+}
+
+// gets the descriptors finds a place on the heap to store all of them contagiously and returns the offset of the first descriptor.
+// the offset of the other descriptor can be calculated this formula by simply: offset + index * stride.
+// the offset is returned by this function, the index is the index in descriptors array, stride is provided by the library already.
+WriteImageDescriptors :: (descriptors: [] Image, type: ImageDescriptorType) -> offset: int {
+   assert(false, "not yet implemented");
+   return 0;
+}
+
+WriteAccelerationStructureDescriptors :: (descriptors: [] AccelerationStructure) -> offset: int {
+   assert(false, "not yet implemented");
+   return 0;
+}
+
+WriteSamplerDescriptors :: (descriptors: SamplerInfo) -> index: int {
+   assert(false, "not yet implemented");
+   return 0;
 }
 
 WriteAccelerationStructureDescriptors :: (startOffset: int, descriptors: [] AccelerationStructure) {
