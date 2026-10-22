@@ -68,6 +68,7 @@ MouseState :: struct {
    buttonsPressed:      [MAX_BUTTON_COUNT] u8;
    buttonsReleased:     [MAX_BUTTON_COUNT] u8;
    wheel:               float;
+   horizontalWheel:     float;
 
    MAX_BUTTON_COUNT :: 16;
 }
@@ -254,6 +255,7 @@ PolledEvent :: struct {
 
       scroll: struct {
          yOffset: float;
+         xOffset: float;
       }
    }
 }
@@ -272,6 +274,7 @@ Window :: struct {
    polledEventsQueue:         Queue(PolledEvent);
    input:                     Input;
    isFramebufferResized:      bool;
+   isFocused:                 bool;
    surface:                   VkSurfaceKHR;
 
    // swapchain related things
@@ -520,8 +523,13 @@ CopyImageToBuffer :: (cmd: *CommandBuffer, source: Image, destination: u64) {
    vkCmdCopyImageToBuffer(cmd.cmd, source.image, VK_IMAGE_LAYOUT_GENERAL, allocationInfo.buffer, 1, *region);
 }
 
-// source is a gpu pointer
+// copies the whole image
 CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image) {
+   CopyToImage(cmd, source, destination, .[0, 0, 0], destination.description.size);
+}
+
+// source is a gpu pointer
+CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image, offset: [3] s32, extent: [3] u32) {
    region: VkBufferImageCopy = .{
       bufferOffset = 0,
       bufferRowLength = 0,
@@ -532,12 +540,8 @@ CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image) {
          baseArrayLayer = 0,
          layerCount = destination.description.arrayLayers,
       },
-      imageOffset = .{ 0, 0, 0 },
-      imageExtent = .{
-         destination.description.size[0],
-         destination.description.size[1],
-         destination.description.size[2],
-      },
+      imageOffset = .{ offset[0], offset[1], offset[2] },
+      imageExtent = .{ extent[0], extent[1], extent[2] },
    };
 
    allocationInfo := GetAllocationInfo(source);
@@ -2021,6 +2025,33 @@ Vector4ToVkClearColorValue :: (v: Vector4) -> VkClearColorValue {
    return result;
 }
 
+SetScissor :: (cmd: *CommandBuffer, x: s32, y: s32, w: u32, h: u32) {
+   scissor: VkRect2D = .{ .{ x, y }, .{ w, h } };
+   vkCmdSetScissorWithCountEXT(cmd.cmd, 1, *scissor);
+}
+
+SetBlendEnable :: (cmd: *CommandBuffer, enable: bool) {
+   colorBlendEnables := VkBool32.[xx enable];
+   vkCmdSetColorBlendEnableEXT(cmd.cmd, 0, 1, colorBlendEnables.data);
+}
+
+SetBlendMode :: (cmd: *CommandBuffer, blend: VkColorBlendEquationEXT) {
+   blend_ := blend;
+   vkCmdSetColorBlendEquationEXT(cmd.cmd, 0, 1, *blend_);
+}
+
+SetCullMode :: (cmd: *CommandBuffer, cullMode: VkCullModeFlags) {
+   vkCmdSetCullMode(cmd.cmd, cullMode);
+}
+
+SetDepthTestEnable :: (cmd: *CommandBuffer, enable: bool) {
+   vkCmdSetDepthTestEnable(cmd.cmd, xx enable);
+}
+
+SetDepthWriteEnable :: (cmd: *CommandBuffer, enable: bool) {
+   vkCmdSetDepthWriteEnable(cmd.cmd, xx enable);
+}
+
 BeginRenderPass :: (cmd: *CommandBuffer, description: RenderPassDescription) {
    assert(description.colorTargets.count > 0, "description.colorTargets.count: %", description.colorTargets.count);
    assert(!description.hasStencilTarget, "stencil not implemented");
@@ -2611,6 +2642,7 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       samplerAnisotropy = xx true,
       depthClamp = xx true,
       shaderInt64 = xx true,
+      shaderInt16 = xx true,
    };
 
    rayQueryFeatures: VkPhysicalDeviceRayQueryFeaturesKHR = .{
@@ -2686,9 +2718,15 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       shaderInt8 = xx true,
    };
 
+   vulkan11Features: VkPhysicalDeviceVulkan11Features = .{
+      sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+      pNext = *vulkan12Features,
+      storageBuffer16BitAccess = xx true,
+   };
+
    deviceCreateInfo: VkDeviceCreateInfo = .{
       sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-      pNext = *vulkan12Features,
+      pNext = *vulkan11Features,
       pQueueCreateInfos = *deviceQueueCreateInfo,
       queueCreateInfoCount = 1,
       pEnabledFeatures = *deviceFeaturesToEnable,
@@ -3230,7 +3268,8 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
          polledEvent: PolledEvent;
          polledEvent.type = .Scroll;
          polledEvent.scroll = .{
-            yOffset = xx yoffset
+            yOffset = xx yoffset,
+            xOffset = xx xoffset
          };
 
          Enqueue(*window.polledEventsQueue, polledEvent);
@@ -3248,6 +3287,18 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
    };
    glfwSetFramebufferSizeCallback(result.window, FramebufferSizeCallback);
 
+   WindowFocusCallback: GLFWwindowfocusfun : (glfwWindow: *GLFWwindow, focused: s32) -> void #c_call {
+      push_context {
+         found, window := table_find(*glfwWindowToWindow, glfwWindow);
+         assert(found);
+
+         window.isFocused = xx focused;
+      }
+   };
+   glfwSetWindowFocusCallback(result.window, WindowFocusCallback);
+
+   result.isFocused = xx glfwGetWindowAttrib(result.window, GLFW_FOCUSED);
+
    vkResult := glfwCreateWindowSurface(vk.instance, result.window, null, *result.surface);
    assert(vkResult == VK_SUCCESS);
 
@@ -3257,15 +3308,16 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
 
 // must be called only once per frame per window
 UpdateInput :: (window: *Window) {
-   glfwPollEvents();
-
    window.input.mouse.positionLastFrame = window.input.mouse.position;
    window.input.mouse.wheel = 0;
+   window.input.mouse.horizontalWheel = 0;
    Clear(*window.input.keyboard.characterQueue);
    memset(*window.input.keyboard.pressedKeys, 0, window.input.keyboard.pressedKeys.count * size_of(type_of(window.input.keyboard.pressedKeys[0])));
    memset(*window.input.keyboard.releasedKeys, 0, window.input.keyboard.releasedKeys.count * size_of(type_of(window.input.keyboard.releasedKeys[0])));
    memset(*window.input.mouse.buttonsPressed, 0, window.input.mouse.buttonsPressed.count * size_of(type_of(window.input.mouse.buttonsPressed[0])));
    memset(*window.input.mouse.buttonsReleased, 0, window.input.mouse.buttonsReleased.count * size_of(type_of(window.input.mouse.buttonsReleased[0])));
+
+   glfwPollEvents();
 
    while (true) {
       success, polledEvent:= Dequeue(*window.polledEventsQueue);
@@ -3298,12 +3350,24 @@ UpdateInput :: (window: *Window) {
 
          case .Scroll; {
             window.input.mouse.wheel += polledEvent.scroll.yOffset;
+            window.input.mouse.horizontalWheel += polledEvent.scroll.xOffset;
          }
 
          case .None; assert(false, "polled event type was none.");
          case; assert(false, "switch case should be exhaustive. polledEvent.type: %", polledEvent.type);
       }
    }
+}
+
+SetClipboardText :: (text: string) {
+   cString := to_c_string(text);
+   defer free(cString); // glfw immeadiately consumes the string.
+   glfwSetClipboardString(null, cString);
+}
+
+GetClipboardText :: () -> string {
+   cString := glfwGetClipboardString(null);
+   return to_string(cString);
 }
 
 IsKeyDown :: (window: *Window, key: KeyboardKey) -> bool {
