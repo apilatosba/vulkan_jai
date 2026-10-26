@@ -497,6 +497,138 @@ BlitImage :: (cmd: *CommandBuffer, source: Image, destination: Image, sourceMip:
    vkCmdBlitImage2(cmd.cmd, *blitInfo);
 }
 
+// bytes per texel for uncompressed color formats
+FormatTexelSize :: (format: VkFormat) -> int {
+   if format == {
+      case .VK_FORMAT_R4G4_UNORM_PACK8;           return 1;
+      case .VK_FORMAT_R4G4B4A4_UNORM_PACK16;      return 2;
+      case .VK_FORMAT_B4G4R4A4_UNORM_PACK16;      return 2;
+      case .VK_FORMAT_R5G6B5_UNORM_PACK16;        return 2;
+      case .VK_FORMAT_B5G6R5_UNORM_PACK16;        return 2;
+      case .VK_FORMAT_R5G5B5A1_UNORM_PACK16;      return 2;
+      case .VK_FORMAT_B5G5R5A1_UNORM_PACK16;      return 2;
+      case .VK_FORMAT_A1R5G5B5_UNORM_PACK16;      return 2;
+      case .VK_FORMAT_R8_UNORM;                   return 1;
+      case .VK_FORMAT_R8_SNORM;                   return 1;
+      case .VK_FORMAT_R8_USCALED;                 return 1;
+      case .VK_FORMAT_R8_SSCALED;                 return 1;
+      case .VK_FORMAT_R8_UINT;                    return 1;
+      case .VK_FORMAT_R8_SINT;                    return 1;
+      case .VK_FORMAT_R8_SRGB;                    return 1;
+      case .VK_FORMAT_R8G8_UNORM;                 return 2;
+      case .VK_FORMAT_R8G8_SNORM;                 return 2;
+      case .VK_FORMAT_R8G8_USCALED;               return 2;
+      case .VK_FORMAT_R8G8_SSCALED;               return 2;
+      case .VK_FORMAT_R8G8_UINT;                  return 2;
+      case .VK_FORMAT_R8G8_SINT;                  return 2;
+      case .VK_FORMAT_R8G8_SRGB;                  return 2;
+      case .VK_FORMAT_R8G8B8_UNORM;               return 3;
+      case .VK_FORMAT_R8G8B8_SNORM;               return 3;
+      case .VK_FORMAT_R8G8B8_USCALED;             return 3;
+      case .VK_FORMAT_R8G8B8_SSCALED;             return 3;
+      case .VK_FORMAT_R8G8B8_UINT;                return 3;
+      case .VK_FORMAT_R8G8B8_SINT;                return 3;
+      case .VK_FORMAT_R8G8B8_SRGB;                return 3;
+      case .VK_FORMAT_B8G8R8_UNORM;               return 3;
+      case .VK_FORMAT_B8G8R8_SNORM;               return 3;
+      case .VK_FORMAT_B8G8R8_USCALED;             return 3;
+      case .VK_FORMAT_B8G8R8_SSCALED;             return 3;
+      case .VK_FORMAT_B8G8R8_UINT;                return 3;
+      case .VK_FORMAT_B8G8R8_SINT;                return 3;
+      case .VK_FORMAT_B8G8R8_SRGB;                return 3;
+      case .VK_FORMAT_R8G8B8A8_UNORM;             return 4;
+      case .VK_FORMAT_R8G8B8A8_SNORM;             return 4;
+      case .VK_FORMAT_R8G8B8A8_USCALED;           return 4;
+      case .VK_FORMAT_R8G8B8A8_SSCALED;           return 4;
+      case .VK_FORMAT_R8G8B8A8_UINT;              return 4;
+      case .VK_FORMAT_R8G8B8A8_SINT;              return 4;
+      case .VK_FORMAT_R8G8B8A8_SRGB;              return 4;
+      case .VK_FORMAT_B8G8R8A8_UNORM;             return 4;
+      case .VK_FORMAT_B8G8R8A8_SNORM;             return 4;
+      case .VK_FORMAT_B8G8R8A8_USCALED;           return 4;
+      case .VK_FORMAT_B8G8R8A8_SSCALED;           return 4;
+      case .VK_FORMAT_B8G8R8A8_UINT;              return 4;
+      case .VK_FORMAT_B8G8R8A8_SINT;              return 4;
+      case .VK_FORMAT_B8G8R8A8_SRGB;              return 4;
+      case .VK_FORMAT_A8B8G8R8_UNORM_PACK32;      return 4;
+      case .VK_FORMAT_A8B8G8R8_SNORM_PACK32;      return 4;
+      case .VK_FORMAT_A8B8G8R8_USCALED_PACK32;    return 4;
+      case .VK_FORMAT_A8B8G8R8_SSCALED_PACK32;    return 4;
+      case .VK_FORMAT_A8B8G8R8_UINT_PACK32;       return 4;
+      case .VK_FORMAT_A8B8G8R8_SINT_PACK32;       return 4;
+      case .VK_FORMAT_A8B8G8R8_SRGB_PACK32;       return 4;
+      case .VK_FORMAT_A2R10G10B10_UNORM_PACK32;   return 4;
+      case .VK_FORMAT_A2R10G10B10_SNORM_PACK32;   return 4;
+      case .VK_FORMAT_A2R10G10B10_USCALED_PACK32; return 4;
+      case .VK_FORMAT_A2R10G10B10_SSCALED_PACK32; return 4;
+      case .VK_FORMAT_A2R10G10B10_UINT_PACK32;    return 4;
+      case .VK_FORMAT_A2R10G10B10_SINT_PACK32;    return 4;
+      case .VK_FORMAT_A2B10G10R10_UNORM_PACK32;   return 4;
+      case .VK_FORMAT_A2B10G10R10_SNORM_PACK32;   return 4;
+      case .VK_FORMAT_A2B10G10R10_USCALED_PACK32; return 4;
+      case .VK_FORMAT_A2B10G10R10_SSCALED_PACK32; return 4;
+      case .VK_FORMAT_A2B10G10R10_UINT_PACK32;    return 4;
+      case .VK_FORMAT_A2B10G10R10_SINT_PACK32;    return 4;
+      case .VK_FORMAT_R16_UNORM;                  return 2;
+      case .VK_FORMAT_R16_SNORM;                  return 2;
+      case .VK_FORMAT_R16_USCALED;                return 2;
+      case .VK_FORMAT_R16_SSCALED;                return 2;
+      case .VK_FORMAT_R16_UINT;                   return 2;
+      case .VK_FORMAT_R16_SINT;                   return 2;
+      case .VK_FORMAT_R16_SFLOAT;                 return 2;
+      case .VK_FORMAT_R16G16_UNORM;               return 4;
+      case .VK_FORMAT_R16G16_SNORM;               return 4;
+      case .VK_FORMAT_R16G16_USCALED;             return 4;
+      case .VK_FORMAT_R16G16_SSCALED;             return 4;
+      case .VK_FORMAT_R16G16_UINT;                return 4;
+      case .VK_FORMAT_R16G16_SINT;                return 4;
+      case .VK_FORMAT_R16G16_SFLOAT;              return 4;
+      case .VK_FORMAT_R16G16B16_UNORM;            return 6;
+      case .VK_FORMAT_R16G16B16_SNORM;            return 6;
+      case .VK_FORMAT_R16G16B16_USCALED;          return 6;
+      case .VK_FORMAT_R16G16B16_SSCALED;          return 6;
+      case .VK_FORMAT_R16G16B16_UINT;             return 6;
+      case .VK_FORMAT_R16G16B16_SINT;             return 6;
+      case .VK_FORMAT_R16G16B16_SFLOAT;           return 6;
+      case .VK_FORMAT_R16G16B16A16_UNORM;         return 8;
+      case .VK_FORMAT_R16G16B16A16_SNORM;         return 8;
+      case .VK_FORMAT_R16G16B16A16_USCALED;       return 8;
+      case .VK_FORMAT_R16G16B16A16_SSCALED;       return 8;
+      case .VK_FORMAT_R16G16B16A16_UINT;          return 8;
+      case .VK_FORMAT_R16G16B16A16_SINT;          return 8;
+      case .VK_FORMAT_R16G16B16A16_SFLOAT;        return 8;
+      case .VK_FORMAT_R32_UINT;                   return 4;
+      case .VK_FORMAT_R32_SINT;                   return 4;
+      case .VK_FORMAT_R32_SFLOAT;                 return 4;
+      case .VK_FORMAT_R32G32_UINT;                return 8;
+      case .VK_FORMAT_R32G32_SINT;                return 8;
+      case .VK_FORMAT_R32G32_SFLOAT;              return 8;
+      case .VK_FORMAT_R32G32B32_UINT;             return 12;
+      case .VK_FORMAT_R32G32B32_SINT;             return 12;
+      case .VK_FORMAT_R32G32B32_SFLOAT;           return 12;
+      case .VK_FORMAT_R32G32B32A32_UINT;          return 16;
+      case .VK_FORMAT_R32G32B32A32_SINT;          return 16;
+      case .VK_FORMAT_R32G32B32A32_SFLOAT;        return 16;
+      case .VK_FORMAT_R64_UINT;                   return 8;
+      case .VK_FORMAT_R64_SINT;                   return 8;
+      case .VK_FORMAT_R64_SFLOAT;                 return 8;
+      case .VK_FORMAT_R64G64_UINT;                return 16;
+      case .VK_FORMAT_R64G64_SINT;                return 16;
+      case .VK_FORMAT_R64G64_SFLOAT;              return 16;
+      case .VK_FORMAT_R64G64B64_UINT;             return 24;
+      case .VK_FORMAT_R64G64B64_SINT;             return 24;
+      case .VK_FORMAT_R64G64B64_SFLOAT;           return 24;
+      case .VK_FORMAT_R64G64B64A64_UINT;          return 32;
+      case .VK_FORMAT_R64G64B64A64_SINT;          return 32;
+      case .VK_FORMAT_R64G64B64A64_SFLOAT;        return 32;
+      case .VK_FORMAT_B10G11R11_UFLOAT_PACK32;    return 4;
+      case .VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;     return 4;
+   }
+
+   assert(false, "FormatTexelSize: unsupported format %", format);
+   return 0;
+}
+
 GetAllocationInfo :: (address: u64) -> AllocationInfo #expand {
    Thread.lock(*vk.gpuPointerToAllocationInfosMutex);
    ok, allocationInfo := table_find(*vk.gpuPointerToAllocationInfos, address);
@@ -507,26 +639,36 @@ GetAllocationInfo :: (address: u64) -> AllocationInfo #expand {
 }
 
 CopyImageToBuffer :: (cmd: *CommandBuffer, source: Image, destination: u64) {
-   region: VkBufferImageCopy = .{
-      bufferOffset = 0,
-      bufferRowLength = 0,
-      bufferImageHeight = 0,
+   size := source.description.size;
+   byteSize := FormatTexelSize(source.description.format) * size[0] * size[1] * size[2] * source.description.arrayLayers;
+
+   region: VkDeviceMemoryImageCopyKHR = .{
+      sType = VK_STRUCTURE_TYPE_DEVICE_MEMORY_IMAGE_COPY_KHR,
+      pNext = null,
+      addressRange = .{ address = destination, size = xx byteSize },
+      addressFlags = GPU_MALLOC_ADDRESS_FLAGS,
+      addressRowLength = 0,
+      addressImageHeight = 0,
       imageSubresource = .{
          aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
          mipLevel = 0,
          baseArrayLayer = 0,
          layerCount = source.description.arrayLayers,
       },
+      imageLayout = VK_IMAGE_LAYOUT_GENERAL,
       imageOffset = .{ 0, 0, 0 },
-      imageExtent = .{
-         source.description.size[0],
-         source.description.size[1],
-         source.description.size[2],
-      },
+      imageExtent = .{ size[0], size[1], size[2] },
    };
 
-   allocationInfo := GetAllocationInfo(destination);
-   vkCmdCopyImageToBuffer(cmd.cmd, source.image, VK_IMAGE_LAYOUT_GENERAL, allocationInfo.buffer, 1, *region);
+   copyInfo: VkCopyDeviceMemoryImageInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_COPY_DEVICE_MEMORY_IMAGE_INFO_KHR,
+      pNext = null,
+      image = source.image,
+      regionCount = 1,
+      pRegions = *region,
+   };
+
+   vkCmdCopyImageToMemoryKHR(cmd.cmd, *copyInfo);
 }
 
 // copies the whole image
@@ -536,22 +678,35 @@ CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image) {
 
 // source is a gpu pointer
 CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image, offset: [3] s32, extent: [3] u32) {
-   region: VkBufferImageCopy = .{
-      bufferOffset = 0,
-      bufferRowLength = 0,
-      bufferImageHeight = 0,
+   byteSize := FormatTexelSize(destination.description.format) * extent[0] * extent[1] * extent[2] * destination.description.arrayLayers;
+
+   region: VkDeviceMemoryImageCopyKHR = .{
+      sType = VK_STRUCTURE_TYPE_DEVICE_MEMORY_IMAGE_COPY_KHR,
+      pNext = null,
+      addressRange = .{ address = source, size = xx byteSize },
+      addressFlags = GPU_MALLOC_ADDRESS_FLAGS,
+      addressRowLength = 0,
+      addressImageHeight = 0,
       imageSubresource = .{
          aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
          mipLevel = 0,
          baseArrayLayer = 0,
          layerCount = destination.description.arrayLayers,
       },
+      imageLayout = VK_IMAGE_LAYOUT_GENERAL,
       imageOffset = .{ offset[0], offset[1], offset[2] },
       imageExtent = .{ extent[0], extent[1], extent[2] },
    };
 
-   allocationInfo := GetAllocationInfo(source);
-   vkCmdCopyBufferToImage(cmd.cmd, allocationInfo.buffer, destination.image, VK_IMAGE_LAYOUT_GENERAL, 1, *region);
+   copyInfo: VkCopyDeviceMemoryImageInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_COPY_DEVICE_MEMORY_IMAGE_INFO_KHR,
+      pNext = null,
+      image = destination.image,
+      regionCount = 1,
+      pRegions = *region,
+   };
+
+   vkCmdCopyMemoryToImageKHR(cmd.cmd, *copyInfo);
 }
 
 DispatchMesh :: (cmd: *CommandBuffer, taskDataPointer: u64, meshDataPointer: u64, fragmentDataPointer: u64, x: u32, y: u32, z: u32) {
@@ -1002,21 +1157,17 @@ BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
    );
    assert(asStorageGpu != 0);
 
-   asStorageAllocationInfo := GetAllocationInfo(asStorageGpu);
-
-   asCreateInfo: VkAccelerationStructureCreateInfoKHR = .{
-      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+   asCreateInfo: VkAccelerationStructureCreateInfo2KHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_2_KHR,
       pNext = null,
       createFlags = 0,
-      buffer = asStorageAllocationInfo.buffer,
-      offset = 0,
-      size = sizeInfo.accelerationStructureSize,
+      addressRange = .{ address = asStorageGpu, size = sizeInfo.accelerationStructureSize },
+      addressFlags = GPU_MALLOC_ADDRESS_FLAGS,
       type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-      deviceAddress = 0,
    };
 
    outAs: VkAccelerationStructureKHR;
-   vkResult := vkCreateAccelerationStructureKHR(vk.device, *asCreateInfo, null, *outAs);
+   vkResult := vkCreateAccelerationStructure2KHR(vk.device, *asCreateInfo, null, *outAs);
    assert(vkResult == VK_SUCCESS);
 
    buildGeometryInfo.dstAccelerationStructure = outAs;
@@ -1162,21 +1313,17 @@ BuildTLAS :: (instances: [] InstanceInfo, waitTimelineValue: u64) -> Acceleratio
    );
    assert(asStorageGpu != 0);
 
-   asStorageAllocationInfo := GetAllocationInfo(asStorageGpu);
-
-   asCreateInfo: VkAccelerationStructureCreateInfoKHR = .{
-      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+   asCreateInfo: VkAccelerationStructureCreateInfo2KHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_2_KHR,
       pNext = null,
       createFlags = 0,
-      buffer = asStorageAllocationInfo.buffer,
-      offset = 0,
-      size = sizeInfo.accelerationStructureSize,
+      addressRange = .{ address = asStorageGpu, size = sizeInfo.accelerationStructureSize },
+      addressFlags = GPU_MALLOC_ADDRESS_FLAGS,
       type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
-      deviceAddress = 0,
    };
 
    outAs: VkAccelerationStructureKHR;
-   vkResult := vkCreateAccelerationStructureKHR(vk.device, *asCreateInfo, null, *outAs);
+   vkResult := vkCreateAccelerationStructure2KHR(vk.device, *asCreateInfo, null, *outAs);
    assert(vkResult == VK_SUCCESS, "vkResult: %", vkResult);
 
    buildGeometryInfo.dstAccelerationStructure = outAs;
@@ -1687,6 +1834,10 @@ SVP :: struct {
    gpu: u64;
 }
 
+// VK_KHR_device_address_commands flags for addresses that point into a GpuMalloc buffer.
+// GpuMalloc buffers are never sparse and always have VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+GPU_MALLOC_ADDRESS_FLAGS :: VK_ADDRESS_COMMAND_FULLY_BOUND_BIT_KHR | VK_ADDRESS_COMMAND_STORAGE_BUFFER_USAGE_BIT_KHR;
+
 // vma does auto alignment for idk some stuff but not for descriptor heaps
 // so you better specify the alignment when creating a descriptor heap
 GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false, $IS_ACCELERATION_STRUCTURE := false, $IS_GEOMETRY := false, $IS_SBT := false) -> cpu: *void, gpu: u64 {
@@ -1713,10 +1864,7 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
    bufferCreateInfo: VkBufferCreateInfo = .{
       sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       pNext = null,
-      size = xx (size + alignment), // +alignment because vulkan spec has a flaw which is fixed in version 1.4.363.
-                                    // rn i have version 1.4.357. so the temporary fix is the overallocate and then align manually
-                                    // this issue is directly related to this: https://github.com/KhronosGroup/Vulkan-Docs/issues/2802
-                                    //          - apila, 01/10/26
+      size = xx size,
       usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
       sharingMode = VK_SHARING_MODE_EXCLUSIVE, // only one queue family can use this buffer at a time.
    };
@@ -1793,6 +1941,27 @@ GpuFree :: (gpuPointer: u64) {
    assert(ok, "you freed without malloc! gpuPointer: %", gpuPointer);
 
    vmaDestroyBuffer(vk.vmaAllocator, allocationInfo.buffer, allocationInfo.allocation);
+}
+
+// you can use memcpy instead if the buffers are cpu visible.
+GpuMemcpy :: (cmd: *CommandBuffer, source: u64, destination: u64, size: int) {
+   region: VkDeviceMemoryCopyKHR = .{
+      sType = VK_STRUCTURE_TYPE_DEVICE_MEMORY_COPY_KHR,
+      pNext = null,
+      srcRange = .{ address = source, size = xx size },
+      srcFlags = GPU_MALLOC_ADDRESS_FLAGS,
+      dstRange = .{ address = destination, size = xx size },
+      dstFlags = GPU_MALLOC_ADDRESS_FLAGS,
+   };
+
+   copyInfo: VkCopyDeviceMemoryInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_COPY_DEVICE_MEMORY_INFO_KHR,
+      pNext = null,
+      regionCount = 1,
+      pRegions = *region,
+   };
+
+   vkCmdCopyMemoryKHR(cmd.cmd, *copyInfo);
 }
 
 CreateMeshletPipeline :: (taskSpirv: [] u8,
@@ -2543,6 +2712,7 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       to_c_string(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,, temp),
       to_c_string(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,, temp),
       to_c_string(VK_KHR_RAY_QUERY_EXTENSION_NAME,, temp),
+      to_c_string(VK_KHR_DEVICE_ADDRESS_COMMANDS_EXTENSION_NAME,, temp),
       // VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME // promoted to core in 1.3
    ];
 
@@ -2607,9 +2777,15 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       shaderInt16 = xx true,
    };
 
+   deviceAddressCommandsFeatures: VkPhysicalDeviceDeviceAddressCommandsFeaturesKHR = .{
+      sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_ADDRESS_COMMANDS_FEATURES_KHR,
+      pNext = null,
+      deviceAddressCommands = xx true,
+   };
+
    rayQueryFeatures: VkPhysicalDeviceRayQueryFeaturesKHR = .{
       sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
-      pNext = null,
+      pNext = *deviceAddressCommandsFeatures,
       rayQuery = xx true,
    };
 
