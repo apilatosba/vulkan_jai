@@ -6,8 +6,9 @@
 #import "Queue";
 Thread :: #import "Thread";
 #import "System";
-#import "ApilaDispatch";
+ApilaDispatch :: #import "ApilaDispatch";
 #import "File";
+DynamicDispatch :: #import "DynamicDispatch";
 
 #if OS == .LINUX {
    #import "POSIX";
@@ -330,6 +331,9 @@ VulkanThings :: struct {
    descriptorHeapProperties:                    VkPhysicalDeviceDescriptorHeapPropertiesEXT;
    accelerationStructureProperties:             VkPhysicalDeviceAccelerationStructurePropertiesKHR;
    rayTracingPipelineProperties:                VkPhysicalDeviceRayTracingPipelinePropertiesKHR;
+
+   // these are the only threads where you can record anything to any cmd (in addition to the main thread)
+   threads:                                     *ApilaDispatch.ThreadsData;
 }
 
 // stores a single VkCommandBuffer and all the command buffers allocated from it
@@ -1034,8 +1038,8 @@ BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
    Submit(cmd);
 
    // freeing the buffers after the vkCmdBuildAccelerationStructuresKHR finishes executing
-   DispatchFunction(WaitAndFree, scratchGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
-   DispatchFunction(WaitAndFree, transformGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
+   DynamicDispatch.DispatchFunction(WaitAndFree, scratchGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
+   DynamicDispatch.DispatchFunction(WaitAndFree, transformGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
 
    asDeviceAddressInfo: VkAccelerationStructureDeviceAddressInfoKHR = .{
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
@@ -1213,8 +1217,8 @@ BuildTLAS :: (instances: [] InstanceInfo, waitTimelineValue: u64) -> Acceleratio
    }
 
    // freeing the buffers after the vkCmdBuildAccelerationStructuresKHR finishes executing
-   DispatchFunction(WaitAndFree, instanceDataGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
-   DispatchFunction(WaitAndFree, scratchGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
+   DynamicDispatch.DispatchFunction(WaitAndFree, instanceDataGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
+   DynamicDispatch.DispatchFunction(WaitAndFree, scratchGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
 
    asDeviceAddressInfo: VkAccelerationStructureDeviceAddressInfoKHR = .{
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
@@ -2185,8 +2189,29 @@ AcquireSwapchainImage :: (window: *Window) {
    }
 }
 
+// generate DispatchRenderFunction overloads
+#insert #run () -> string {
+   builder: String_Builder;
+   for 0..9 {
+      print_to_builder(*builder, GenerateDispatchRenderFunction(it));
+   }
+
+   return builder_to_string(*builder);
+}();
+
 StartCommandRecording :: () -> *CommandBuffer {
-   commandPool := *vk.commandPools[context.thread_index];
+   commandPoolIndex: int;
+
+   // if this is the main thread
+   if (context.thread_index == 0) {
+      commandPoolIndex = 0;
+   } else {
+      // the range is from vk.threads[0].index..vk.threads[0].index+vk.threads.count
+      baseIndex := vk.threads.threads.worker_info[0].thread.index;
+      commandPoolIndex = context.thread_index - baseIndex + 1; // +1 because 0 is for the main thread.
+   }
+
+   commandPool := *vk.commandPools[commandPoolIndex];
 
    // get an available command buffer
    gpuSemaphoreTime: u64;
@@ -2404,10 +2429,8 @@ WindowShouldClose :: (window: *Window) -> bool {
    return xx glfwWindowShouldClose(window.window);
 }
 
-// resource heap max size is 32MB on my machine (driver reserved range included).
-// sampler heap max size is 128KB on my machine (driver reserved range included).
-// since they are not too much by default i set the desired count U32_MAX, which then will be clamped
-//          - apila, 26/06/26
+// when this function is executing no other running thread should try to create a thread because i rely on vk.threads being consecutive
+//       - apila, 26/10/26
 InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
    #if OS == .LINUX {
       vulkan := dlopen("libvulkan.so.1", RTLD_LAZY);
@@ -2760,8 +2783,19 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
    vk.surfaceFormat = ChooseSwapSurfaceFormat(surfaceFormats);
    vk.presentMode = ChooseSwapPresentMode(presentModes);
 
-   vk.commandPools = NewArray(threadCount, CommandPool); // not a leak. vk is a global thingy
-   for 0..threadCount - 1 {
+   vk.threads = ApilaDispatch.InitializeThreads();
+
+   // asserting that indices of vk.threads are in order
+   {
+      baseIndex := vk.threads.threads.worker_info[0].thread.index;
+      for baseIndex..baseIndex + vk.threads.threadCount - 1 {
+         it_index := it - baseIndex;
+         assert(it == vk.threads.threads.worker_info[it_index].thread.index);
+      }
+   }
+
+   vk.commandPools = NewArray(vk.threads.threadCount + 1, CommandPool); // not a leak. vk is a global thingy
+   for 0..vk.commandPools.count - 1 {
       vk.commandPools[it].commandPool = CreateCommandPool(vk.graphicsQueueFamilyIndexWithPresentSupport);
    }
 
@@ -2794,6 +2828,8 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       InitDescriptorHeapAllocator(*vk.resourceHeapAllocator, vk.resourceHeapSize - xx vk.descriptorHeapProperties.minResourceHeapReservedRange);
       InitDescriptorHeapAllocator(*vk.samplerHeapAllocator, vk.samplerHeapSize - xx vk.descriptorHeapProperties.minSamplerHeapReservedRange);
    }
+
+   DynamicDispatch.Initialize();
 
    return window;
 }
@@ -3640,4 +3676,36 @@ DescriptorHeapFree :: (allocator: *DescriptorHeapAllocator, offset: int) {
    } else {
       array_insert_at(blocks, .{ offset = offset, size = size }, insertIndex);
    }
+}
+
+GenerateDispatchRenderFunction :: (parameterCount: int) -> string {
+   b: String_Builder;
+
+   print_to_builder(*b, "DispatchRenderFunction :: (function: #type (");
+
+   if (parameterCount > 0) {
+      for 0..parameterCount - 2 {
+         print_to_builder(*b, "_: $T%, ", it);
+      }
+      print_to_builder(*b, "_: $T%", parameterCount - 1);
+   }
+
+   print_to_builder(*b, ") -> ()");
+
+   for 0..parameterCount - 1 {
+      print_to_builder(*b, ", p%1: T%1", it);
+   }
+
+   print_to_builder(*b, ") {\n");
+
+   print_to_builder(*b, "   ApilaDispatch.DispatchFunction(vk.threads, function");
+
+   for 0..parameterCount - 1 {
+      print_to_builder(*b, ", p%", it);
+   }
+   print_to_builder(*b, ");\n");
+
+   print_to_builder(*b, "}\n");
+
+   return builder_to_string(*b);
 }
