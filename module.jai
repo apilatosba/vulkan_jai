@@ -784,7 +784,7 @@ ImageDescriptionToVkImageCreateInfo :: (description: ImageDescription) -> VkImag
 
 // get the size and aligment requirements for an image thats stored in a buffer of type MemoryType.Gpu.
 // optimal tiling so it is driver dependent and needs to be queried
-ImageSizeAndAlignment :: (description: ImageDescription) -> size: int, alignment: int  {
+GetImageSizeAndAlignment :: (description: ImageDescription) -> size: int, alignment: int  {
    imageCreateInfo := ImageDescriptionToVkImageCreateInfo(description);
 
    imageMemoryRequirements: VkDeviceImageMemoryRequirements = .{
@@ -1054,60 +1054,33 @@ IDENTITY_TRANSFORM_MATRIX :: VkTransformMatrixKHR.{
    ]
 };
 
-AccelerationStructure :: struct {
-   accelerationStructure:  VkAccelerationStructureKHR;
-
-   // https://docs.vulkan.org/refpages/latest/refpages/source/vkGetAccelerationStructureDeviceAddressKHR.html
-   // "For acceleration structures created with vkCreateAccelerationStructureKHR, their device address may be different from the buffer device address corresponding to the acceleration structure’s start offset in its storage buffer for acceleration structure types other than VK_ACCELERATION_STRUCTURE_TYPE_GENERIC_KHR."
-   gpuAddress:             u64; // address of the backing AS storage buffer allocated via GpuMalloc
-   deviceAddress:          u64; // vkGetAccelerationStructureDeviceAddressKHR result
-
-   size:                   int;
-   type:                   VkAccelerationStructureTypeKHR;
-
-   // use this to wait for stuff. idk.
-   //    pSemaphores = *vk.graphicsQueueTimelineSemaphore.semaphore,
-   //    pValues = *cmd.doneTimelineValue,
-   cmd:                    CommandBuffer;
+AccelerationStructureSizes :: struct {
+   accelerationStructureSize:            int;
+   updateScratchSize:                    int;
+   buildScratchSize:                     int;
 }
 
-// can be a submesh too (and usually is), meaning that one instance of this struct doesn't need to contain all the vertices given in the vertexData, vertexCount pair.
-TrianglesInfo :: struct {
-   vertexFormat:        VkFormat;
-   vertexData:          u64; // gpu pointer
-   vertexCount:         int;
-   vertexStride:        int;
-   indexType:           VkIndexType;
-   indexData:           u64;  // do your offsetting for submeshes here
-                              // keep the whole vertices buffer as is
-   primitiveCount:      int; // from onwards indexData
+// acceleration structure alignment is a spec reqiurement, not a driver dependent thing.
+ACCELERATION_STRUCTURE_ALIGNMENT :: 256;
 
-   // to flatten the hierarchy.
-   // if there is no hierarchy (if loaded from obj or something, idk) then the default value is okay
-   localToRootMatrix:   VkTransformMatrixKHR = IDENTITY_TRANSFORM_MATRIX;
+// i have this because i dont want the user code to access the "vk" global.
+GetScratchAlignment :: () -> int #expand {
+   return vk.accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment;
 }
 
-BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
-   assert(geometries.count > 0);
+GetBLASSizes :: (description: *BLASDescription) -> AccelerationStructureSizes {
+   geometryInfos := NewArray(description.geometries.count, VkAccelerationStructureGeometryKHR,, temp);
+   primitiveCounts := NewArray(description.geometries.count, u32,, temp);
 
-   geometryInfos := NewArray(geometries.count, VkAccelerationStructureGeometryKHR,, temp);
-   buildRangeInfos := NewArray(geometries.count, VkAccelerationStructureBuildRangeInfoKHR,, temp);
-   primitiveCounts := NewArray(geometries.count, u32,, temp);
-
-   transforms := NewArray(geometries.count, VkTransformMatrixKHR,, temp);
-   transformCpu, transformGpu := GpuMalloc(size_of(VkTransformMatrixKHR) * geometries.count, 16, debugName = "BuildBLAS transforms", IS_GEOMETRY = true);
-
-   for geometries {
+   for description.geometries {
       assert(it.vertexCount > 0, "vertexCount: %", it.vertexCount);
       assert(it.primitiveCount > 0, "primitiveCount: %", it.primitiveCount);
-
-      transforms[it_index] = it.localToRootMatrix;
 
       geometryInfos[it_index] = .{
          sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
          pNext = null,
          geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
-         flags = VK_GEOMETRY_OPAQUE_BIT_KHR,
+         flags = ifx it.opaque then VK_GEOMETRY_OPAQUE_BIT_KHR else 0,
          geometry.triangles = .{
             sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
             pNext = null,
@@ -1117,34 +1090,25 @@ BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
             maxVertex = xx (it.vertexCount - 1),
             indexType = it.indexType,
             indexData.deviceAddress = it.indexData,
-            transformData.deviceAddress = transformGpu + (it_index * size_of(VkTransformMatrixKHR)).(u64),
+            transformData.deviceAddress = it.transform,
          }
-      };
-
-      buildRangeInfos[it_index] = .{
-         primitiveCount = xx it.primitiveCount,
-         primitiveOffset = 0,
-         firstVertex = 0,
-         transformOffset = 0,
       };
 
       primitiveCounts[it_index] = xx it.primitiveCount;
    }
 
-   memcpy(transformCpu, transforms.data, transforms.count * size_of(type_of(transforms[0])));
-
    buildGeometryInfo: VkAccelerationStructureBuildGeometryInfoKHR = .{
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
       pNext = null,
       type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-      flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
-      mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
-      srcAccelerationStructure = null,
-      dstAccelerationStructure = null,
+      flags = description.flags,
+      // mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,   // ignored by vkGetAccelerationStructureBuildSizesKHR
+      // srcAccelerationStructure = null,                         // ignored by vkGetAccelerationStructureBuildSizesKHR
+      // dstAccelerationStructure = null,                         // ignored by vkGetAccelerationStructureBuildSizesKHR
       geometryCount = xx geometryInfos.count,
       pGeometries = geometryInfos.data,
       ppGeometries = null,
-      scratchData.deviceAddress = 0,
+      // scratchData.deviceAddress = 0,                           // ignored by vkGetAccelerationStructureBuildSizesKHR
    };
 
    sizeInfo: VkAccelerationStructureBuildSizesInfoKHR = .{
@@ -1160,66 +1124,290 @@ BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
       *sizeInfo
    );
 
-   _, asStorageGpu := GpuMalloc(
-      sizeInfo.accelerationStructureSize.(int),
-      256,
-      type = .Gpu,
-      debugName = "BLAS storage",
-      IS_ACCELERATION_STRUCTURE = true
+   result: AccelerationStructureSizes = .{
+      accelerationStructureSize = xx sizeInfo.accelerationStructureSize,
+      updateScratchSize = xx sizeInfo.updateScratchSize,
+      buildScratchSize = xx sizeInfo.buildScratchSize,
+   };
+
+   description.sizeCache = result;
+   return result;
+}
+
+TLASDescription :: struct {
+    maxInstances: int;
+    flags:        VkBuildAccelerationStructureFlagsKHR = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+}
+
+GetTLASSizes :: (description: TLASDescription) -> AccelerationStructureSizes {
+   assert(description.maxInstances > 0, "maxInstances: %", description.maxInstances);
+
+   geometryInfo: VkAccelerationStructureGeometryKHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+      pNext = null,
+      geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
+      flags = 0,
+      geometry.instances = .{
+         sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+         pNext = null,
+         arrayOfPointers = xx false,
+         // data.deviceAddress = 0,                                  // ignored by vkGetAccelerationStructureBuildSizesKHR
+      }
+   };
+
+   buildGeometryInfo: VkAccelerationStructureBuildGeometryInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+      pNext = null,
+      type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+      flags = description.flags,
+      // mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+      // srcAccelerationStructure = null,
+      // dstAccelerationStructure = null,
+      geometryCount = 1,
+      pGeometries = *geometryInfo,
+      ppGeometries = null,
+      // scratchData.deviceAddress = 0,
+   };
+
+   sizeInfo: VkAccelerationStructureBuildSizesInfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
+      pNext = null,
+   };
+
+   primitiveCount: u32 = xx description.maxInstances;
+
+   vkGetAccelerationStructureBuildSizesKHR(
+      vk.device,
+      VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+      *buildGeometryInfo,
+      *primitiveCount,
+      *sizeInfo
    );
-   assert(asStorageGpu != 0);
+
+   return .{
+      accelerationStructureSize = xx sizeInfo.accelerationStructureSize,
+      updateScratchSize = xx sizeInfo.updateScratchSize,
+      buildScratchSize = xx sizeInfo.buildScratchSize,
+   };
+}
+
+CreateBLAS :: #bake_arguments CreateAccelerationStructure(type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
+CreateTLAS :: #bake_arguments CreateAccelerationStructure(type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR);
+CreateAccelerationStructure :: (buffer: u64, size: int, type: VkAccelerationStructureTypeKHR) -> AccelerationStructure {
+   assert(buffer != 0);
+   assert(size > 0, "size: %", size);
 
    asCreateInfo: VkAccelerationStructureCreateInfo2KHR = .{
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_2_KHR,
       pNext = null,
       createFlags = 0,
-      addressRange = .{ address = asStorageGpu, size = sizeInfo.accelerationStructureSize },
+      addressRange = .{ address = buffer, size = xx size },
       addressFlags = GPU_MALLOC_ADDRESS_FLAGS,
-      type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+      type = type,
    };
 
    outAs: VkAccelerationStructureKHR;
    vkResult := vkCreateAccelerationStructure2KHR(vk.device, *asCreateInfo, null, *outAs);
    assert(vkResult == VK_SUCCESS);
 
-   buildGeometryInfo.dstAccelerationStructure = outAs;
+   //
+   // i wouldnt have this piece of code if it wasnt for this stupid validation error:
+   //    Validation Error: [ VUID-VkResourceDescriptorInfoEXT-type-11483 ] | MessageID = 0xa472cf31
+   //    vkWriteResourceDescriptorsEXT(): pResources[0].data.pAddressRange->address is 0xffff800102750300 which is not an address obtained from a currently existing VkAccelerationStructureKHR after a call to vkGetAccelerationStructureDeviceAddressKHR.
+   //    The following buffers were found at this address:
+   //       VkBuffer 0x400000000040, size: 226880 bytes, range: [0xffff800102750300, 0xffff800102787940)
+   //    The Vulkan spec states: If type is VK_DESCRIPTOR_TYPE_PARTITIONED_ACCELERATION_STRUCTURE_NV or VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, and data.pAddressRange is not NULL, data.pAddressRange->address must be an acceleration structure address retrieved from a VkAccelerationStructureKHR object via vkGetAccelerationStructureDeviceAddressKHR (https://docs.vulkan.org/spec/latest/chapters/descriptorheaps.html#VUID-VkResourceDescriptorInfoEXT-type-11483)
+   //
+   // in the docs it says: If the acceleration structure was created with vkCreateAccelerationStructure2KHR, the return value will be the same address as addressRange.address. https://docs.vulkan.org/refpages/latest/refpages/source/vkGetAccelerationStructureDeviceAddressKHR.html
+   // so, im just having the call to vkGetAccelerationStructureDeviceAddressKHR here so that validation layer shuts up.
+   //
+   // https://github.com/KhronosGroup/Vulkan-Docs/issues/2844
+   //             - apila, 27/10/26
+   //
+   {
+      asDeviceAddressInfo: VkAccelerationStructureDeviceAddressInfoKHR = .{
+         sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+         pNext = null,
+         accelerationStructure = outAs,
+      };
 
-   _, scratchGpu := GpuMalloc(
-      sizeInfo.buildScratchSize.(int),
-      vk.accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment,
-      type = .Gpu,
-      debugName = "BLAS scratch"
-   );
-   assert(scratchGpu != 0);
-
-   buildGeometryInfo.scratchData.deviceAddress = scratchGpu;
-
-   buildRangePointers := (*VkAccelerationStructureBuildRangeInfoKHR).[buildRangeInfos.data];
-
-   cmd := StartCommandRecording();
-   vkCmdBuildAccelerationStructuresKHR(cmd.cmd, 1, *buildGeometryInfo, buildRangePointers.data);
-   Submit(cmd);
-
-   // freeing the buffers after the vkCmdBuildAccelerationStructuresKHR finishes executing
-   DeferGpuFree(.[.{ timelineValue = cmd.doneTimelineValue, buffer = scratchGpu }, .{ timelineValue = cmd.doneTimelineValue, buffer = transformGpu }]);
-
-   asDeviceAddressInfo: VkAccelerationStructureDeviceAddressInfoKHR = .{
-      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-      pNext = null,
-      accelerationStructure = outAs,
-   };
-
-   asDeviceAddress := vkGetAccelerationStructureDeviceAddressKHR(vk.device, *asDeviceAddressInfo);
-   assert(asDeviceAddress != 0);
+      asDeviceAddress := vkGetAccelerationStructureDeviceAddressKHR(vk.device, *asDeviceAddressInfo);
+      assert(asDeviceAddress != 0);
+      assert(asDeviceAddress == buffer);
+   }
 
    return .{
       accelerationStructure = outAs,
-      gpuAddress = asStorageGpu,
-      deviceAddress = asDeviceAddress,
-      size = xx sizeInfo.accelerationStructureSize,
-      type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-      cmd = cmd,
+      address = buffer,
+      size = size,
+      type = type,
    };
+}
+
+BuildBLASData :: struct {
+   blas:          AccelerationStructure;
+   description:   BLASDescription;
+}
+
+// scratchSize is used for batching, multiple blases can be built with a single vkCmdBuildAccelerationStructuresKHR call.
+// scratchSize at least must be as large as to hold the largest blas scratch size which the user must query with GetBLASSizes.
+BuildBLASes :: (cmd: *CommandBuffer, blases: [] BuildBLASData, scratch: u64, scratchSize: int) {
+   if (blases.count == 0) {
+      return;
+   }
+
+   scratchAlignment := vk.accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment;
+   assert(scratch != 0);
+   assert(scratch % scratchAlignment.(u64) == 0, "scratch: %, alignment: %", scratch, scratchAlignment);
+
+   buildGeometryInfos := NewArray(blases.count, VkAccelerationStructureBuildGeometryInfoKHR,, temp);
+   buildRangePointers := NewArray(blases.count, *VkAccelerationStructureBuildRangeInfoKHR,, temp);
+   buildScratchSizes  := NewArray(blases.count, int,, temp);
+
+   for * blases {
+      geometries := it.description.geometries;
+      assert(geometries.count > 0);
+      assert(it.blas.type == VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, "type: %", it.blas.type);
+
+      geometryInfos := NewArray(geometries.count, VkAccelerationStructureGeometryKHR,, temp);
+      buildRangeInfos := NewArray(geometries.count, VkAccelerationStructureBuildRangeInfoKHR,, temp);
+      primitiveCounts := NewArray(geometries.count, u32,, temp);
+
+      for geometry, geometryIndex: geometries {
+         assert(geometry.vertexCount > 0, "vertexCount: %", geometry.vertexCount);
+         assert(geometry.primitiveCount > 0, "primitiveCount: %", geometry.primitiveCount);
+
+         geometryInfos[geometryIndex] = .{
+            sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+            pNext = null,
+            geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
+            flags = ifx geometry.opaque then VK_GEOMETRY_OPAQUE_BIT_KHR else 0,
+            geometry.triangles = .{
+               sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+               pNext = null,
+               vertexFormat = geometry.vertexFormat,
+               vertexData.deviceAddress = geometry.vertexData,
+               vertexStride = xx geometry.vertexStride,
+               maxVertex = xx (geometry.vertexCount - 1),
+               indexType = geometry.indexType,
+               indexData.deviceAddress = geometry.indexData,
+               transformData.deviceAddress = geometry.transform,
+            }
+         };
+
+         buildRangeInfos[geometryIndex] = .{
+            primitiveCount = xx geometry.primitiveCount,
+            primitiveOffset = 0,
+            firstVertex = 0,
+            transformOffset = 0,
+         };
+
+         primitiveCounts[geometryIndex] = xx geometry.primitiveCount;
+      }
+
+      buildGeometryInfos[it_index] = .{
+         sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+         pNext = null,
+         type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+         flags = it.description.flags,
+         mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+         dstAccelerationStructure = it.blas.accelerationStructure,
+         geometryCount = xx geometryInfos.count,
+         pGeometries = geometryInfos.data,
+         ppGeometries = null,
+         // scratchData.deviceAddress is assigned below while batching
+      };
+
+      buildRangePointers[it_index] = buildRangeInfos.data;
+
+      sizes := it.description.sizeCache;
+
+      if (sizes.accelerationStructureSize == 0) {
+         sizeInfo: VkAccelerationStructureBuildSizesInfoKHR = .{
+            sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
+            pNext = null,
+         };
+
+         vkGetAccelerationStructureBuildSizesKHR(
+            vk.device,
+            VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+            *buildGeometryInfos[it_index],
+            primitiveCounts.data,
+            *sizeInfo
+         );
+
+         sizes = .{
+            accelerationStructureSize = xx sizeInfo.accelerationStructureSize,
+            updateScratchSize = xx sizeInfo.updateScratchSize,
+            buildScratchSize = xx sizeInfo.buildScratchSize,
+         };
+
+         it.description.sizeCache = sizes;
+      }
+
+      assert(it.blas.size >= sizes.accelerationStructureSize, "blas size: %, required: %", it.blas.size, sizes.accelerationStructureSize);
+      assert(scratchSize >= sizes.buildScratchSize, "scratchSize: %, required: %", scratchSize, sizes.buildScratchSize);
+
+      buildScratchSizes[it_index] = sizes.buildScratchSize;
+   }
+
+   // pack as many blases as fit into the scratch buffer into a single vkCmdBuildAccelerationStructuresKHR call.
+   // when the scratch is full, flush the batch and put a barrier so the next batch can reuse the scratch memory.
+   batchStart := 0;
+   scratchOffset := 0;
+
+   for blases {
+      if (scratchOffset + buildScratchSizes[it_index] > scratchSize) {
+         vkCmdBuildAccelerationStructuresKHR(cmd.cmd, xx (it_index - batchStart), buildGeometryInfos.data + batchStart, buildRangePointers.data + batchStart);
+
+         GpuBarrier(
+            cmd,
+            VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR
+         );
+
+         batchStart = it_index;
+         scratchOffset = 0;
+      }
+
+      buildGeometryInfos[it_index].scratchData.deviceAddress = scratch + scratchOffset.(u64);
+      scratchOffset = Align(scratchOffset + buildScratchSizes[it_index], scratchAlignment.(int));
+   }
+
+   vkCmdBuildAccelerationStructuresKHR(cmd.cmd, xx (blases.count - batchStart), buildGeometryInfos.data + batchStart, buildRangePointers.data + batchStart);
+}
+
+BLASDescription :: struct {
+   geometries: [] TrianglesInfo;
+   flags:      VkBuildAccelerationStructureFlagsKHR = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+
+   // this is not a description. but the size information is needed when you build or update/refit the blas.
+   // so im caching it here to avoid a call to the driver.
+   sizeCache: AccelerationStructureSizes;
+}
+
+AccelerationStructure :: struct {
+   accelerationStructure:  VkAccelerationStructureKHR;
+   address:                u64;
+   size:                   int;
+   type:                   VkAccelerationStructureTypeKHR;
+}
+
+// can be a submesh too (and usually is), meaning that one instance of this struct doesn't need to contain all the vertices given in the vertexData, vertexCount pair.
+TrianglesInfo :: struct {
+   vertexFormat:        VkFormat;
+   vertexData:          u64; // gpu pointer
+   vertexCount:         int;
+   vertexStride:        int;
+   indexType:           VkIndexType;
+   indexData:           u64;  // do your offsetting for submeshes here
+                              // keep the whole vertices buffer as is
+   primitiveCount:      int; // from onwards indexData
+
+   // to flatten the hierarchy.
+   // null is valid and means identity matrix.
+   transform:           u64;
+   opaque:              bool = true;
 }
 
 DeferGpuFree :: (items: [] ToBeFreedItem) #expand {
@@ -1231,51 +1419,42 @@ DeferGpuFree :: (items: [] ToBeFreedItem) #expand {
    }
 }
 
-InstanceInfo :: struct {
-   blasReference:    AccelerationStructure;
-   modelMatrix:      VkTransformMatrixKHR;
-   customIndex:      u32 = 0; // lower 24 bits
-   mask:             u8 = 0xFF;
-   sbtRecordOffset:  u32 = 0; // lower 24 bits
-   flags:            VkGeometryInstanceFlagsKHR = 0;
+MakeTLASInstance :: (transform: VkTransformMatrixKHR, blasAddress: u64, customIndex: u32, mask: u8, sbtRecordOffset: u32, flags: VkGeometryInstanceFlagsKHR) -> VkAccelerationStructureInstanceKHR #expand {
+   assert(customIndex <= 0x00FF_FFFF, "customIndex: %", customIndex); // 24 bits
+   assert(sbtRecordOffset <= 0x00FF_FFFF, "sbtRecordOffset: %", sbtRecordOffset); // 24 bits
+   assert(flags <= 0xFF, "flags: %", flags); // 8 bits
+
+   return .{
+      transform = transform,
+      merged_bitfield_24_bits_for_instanceCustomIndex_8_bits_for_mask = customIndex | (mask.(u32) << 24),
+      merged_bitfield_24_bits_for_instanceShaderBindingTableRecordOffset_8_bits_for_flags = sbtRecordOffset | (flags.(u32) << 24),
+      accelerationStructureReference = blasAddress,
+   };
 }
 
-// implicit usage: waitTimelineValue=U64_MAX means dont wait
-BuildTLAS :: (instances: [] InstanceInfo, waitTimelineValue: u64) -> AccelerationStructure {
-   assert(instances.count > 0, "count: %", instances.count);
+BuildTLAS :: (cmd: *CommandBuffer, tlas: AccelerationStructure, description: TLASDescription, instances: u64, instanceCount: int, scratch: u64) {
+   assert(tlas.type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, "type: %", tlas.type);
+   assert(instanceCount > 0, "instanceCount: %", instanceCount);
+   assert(instanceCount <= description.maxInstances, "instanceCount: %, maxInstances: %", instanceCount, description.maxInstances);
 
-   instanceDatas := NewArray(instances.count, VkAccelerationStructureInstanceKHR);
-   instanceDataCpuUntyped, instanceDataGpu := GpuMalloc(size_of(VkAccelerationStructureInstanceKHR) * instances.count, 16, debugName = "TLAS instances", IS_GEOMETRY = true);
+   // instances buffer must be 16 byte aligned
+   assert(instances != 0);
+   assert(instances % 16 == 0, "instances: %", instances);
 
-   instanceDataCpu := instanceDataCpuUntyped.(*VkAccelerationStructureInstanceKHR);
-
-   for instances {
-      assert(it.blasReference.accelerationStructure != null);
-      assert(it.blasReference.deviceAddress != 0);
-
-      customIndex24 := it.customIndex & 0x00FF_FFFF;
-      sbtOffset24 := it.sbtRecordOffset & 0x00FF_FFFF;
-
-      instanceDatas[it_index] = .{
-         transform = it.modelMatrix,
-         merged_bitfield_24_bits_for_instanceCustomIndex_8_bits_for_mask = customIndex24 | (it.mask.(u32) << 24),
-         merged_bitfield_24_bits_for_instanceShaderBindingTableRecordOffset_8_bits_for_flags = sbtOffset24 | ((it.flags & 0xFF) << 24).(u32),
-         accelerationStructureReference = it.blasReference.deviceAddress,
-      };
-   }
-
-   memcpy(instanceDataCpu, instanceDatas.data, instanceDatas.count * size_of(type_of(instanceDatas[0])));
+   scratchAlignment := vk.accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment;
+   assert(scratch != 0);
+   assert(scratch % scratchAlignment.(u64) == 0, "scratch: %, alignment: %", scratch, scratchAlignment);
 
    geometryInfo: VkAccelerationStructureGeometryKHR = .{
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
       pNext = null,
       geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
-      flags = VK_GEOMETRY_OPAQUE_BIT_KHR, // opaque clueeeeeee Clueless
+      flags = 0,
       geometry.instances = .{
          sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
          pNext = null,
          arrayOfPointers = xx false,
-         data.deviceAddress = instanceDataGpu,
+         data.deviceAddress = instances,
       }
    };
 
@@ -1283,67 +1462,18 @@ BuildTLAS :: (instances: [] InstanceInfo, waitTimelineValue: u64) -> Acceleratio
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
       pNext = null,
       type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
-      flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
+      flags = description.flags,
       mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
       srcAccelerationStructure = null,
-      dstAccelerationStructure = null,
+      dstAccelerationStructure = tlas.accelerationStructure,
       geometryCount = 1,
       pGeometries = *geometryInfo,
       ppGeometries = null,
-      scratchData.deviceAddress = 0,
+      scratchData.deviceAddress = scratch,
    };
-
-   primitiveCount: u32 = xx instances.count;
-
-   sizeInfo: VkAccelerationStructureBuildSizesInfoKHR = .{
-      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
-      pNext = null,
-   };
-
-   vkGetAccelerationStructureBuildSizesKHR(
-      vk.device,
-      VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-      *buildGeometryInfo,
-      *primitiveCount,
-      *sizeInfo
-   );
-
-   _, asStorageGpu := GpuMalloc(
-      sizeInfo.accelerationStructureSize.(int),
-      256,
-      type = .Gpu,
-      debugName = "TLAS storage",
-      IS_ACCELERATION_STRUCTURE = true
-   );
-   assert(asStorageGpu != 0);
-
-   asCreateInfo: VkAccelerationStructureCreateInfo2KHR = .{
-      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_2_KHR,
-      pNext = null,
-      createFlags = 0,
-      addressRange = .{ address = asStorageGpu, size = sizeInfo.accelerationStructureSize },
-      addressFlags = GPU_MALLOC_ADDRESS_FLAGS,
-      type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
-   };
-
-   outAs: VkAccelerationStructureKHR;
-   vkResult := vkCreateAccelerationStructure2KHR(vk.device, *asCreateInfo, null, *outAs);
-   assert(vkResult == VK_SUCCESS, "vkResult: %", vkResult);
-
-   buildGeometryInfo.dstAccelerationStructure = outAs;
-
-   _, scratchGpu := GpuMalloc(
-      sizeInfo.buildScratchSize.(int),
-      vk.accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment,
-      type = .Gpu,
-      debugName = "TLAS scratch"
-   );
-   assert(scratchGpu != 0);
-
-   buildGeometryInfo.scratchData.deviceAddress = scratchGpu;
 
    buildRangeInfo: VkAccelerationStructureBuildRangeInfoKHR = .{
-      primitiveCount = primitiveCount,
+      primitiveCount = xx instanceCount,
       primitiveOffset = 0,
       firstVertex = 0,
       transformOffset = 0,
@@ -1351,8 +1481,7 @@ BuildTLAS :: (instances: [] InstanceInfo, waitTimelineValue: u64) -> Acceleratio
 
    buildRangePointers := (*VkAccelerationStructureBuildRangeInfoKHR).[*buildRangeInfo];
 
-   cmd := StartCommandRecording();
-
+   // wait for the blas builds recorded before this in the same command buffer
    GpuBarrier(
       cmd,
       VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
@@ -1360,33 +1489,6 @@ BuildTLAS :: (instances: [] InstanceInfo, waitTimelineValue: u64) -> Acceleratio
    );
 
    vkCmdBuildAccelerationStructuresKHR(cmd.cmd, 1, *buildGeometryInfo, buildRangePointers.data);
-
-   if (waitTimelineValue == U64_MAX) {
-      Submit(cmd);
-   } else {
-      Submit(cmd, waitSemaphores = .[.{ vk.graphicsQueueTimelineSemaphore.semaphore, waitTimelineValue }]);
-   }
-
-   // freeing the buffers after the vkCmdBuildAccelerationStructuresKHR finishes executing
-   DeferGpuFree(.[.{ timelineValue = cmd.doneTimelineValue, buffer = scratchGpu }, .{ timelineValue = cmd.doneTimelineValue, buffer = instanceDataGpu }]);
-
-   asDeviceAddressInfo: VkAccelerationStructureDeviceAddressInfoKHR = .{
-      sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-      pNext = null,
-      accelerationStructure = outAs,
-   };
-
-   asDeviceAddress := vkGetAccelerationStructureDeviceAddressKHR(vk.device, *asDeviceAddressInfo);
-   assert(asDeviceAddress != 0);
-
-   return .{
-      accelerationStructure = outAs,
-      gpuAddress = asStorageGpu,
-      deviceAddress = asDeviceAddress,
-      size = xx sizeInfo.accelerationStructureSize,
-      type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
-      cmd = cmd
-   };
 }
 
 RayTracingPipeline :: struct {
@@ -3776,7 +3878,7 @@ WriteAccelerationStructureDescriptors :: (startOffset: int, descriptors: [] Acce
 
    for descriptors {
       deviceAddressRanges[it_index] = .{
-         address = descriptors[it_index].deviceAddress,
+         address = descriptors[it_index].address,
          size = xx descriptors[it_index].size,
       };
 
