@@ -8,7 +8,6 @@ Thread :: #import "Thread";
 #import "System";
 ApilaDispatch :: #import "ApilaDispatch";
 #import "File";
-DynamicDispatch :: #import "DynamicDispatch";
 
 #if OS == .LINUX {
    #import "POSIX";
@@ -301,7 +300,7 @@ VulkanThings :: struct {
    vmaAllocator:                                VmaAllocator;
    surfaceFormat:                               VkSurfaceFormatKHR;
    presentMode:                                 VkPresentModeKHR;
-   commandPools:                                [] CommandPool;   // one pool per thread. thread local storages. 0th index is for the main thread.
+   commandPools:                                [] ApilaDispatch.TLSItem(CommandPool);   // one pool per thread. thread local storages. 0th index is for the main thread.
                                                                   //
                                                                   // this field is meant to be global but it is fine to keep it here
                                                                   // since the whole struct has only one global instance.
@@ -334,6 +333,19 @@ VulkanThings :: struct {
 
    // these are the only threads where you can record anything to any cmd (in addition to the main thread)
    threads:                                     *ApilaDispatch.ThreadsData;
+
+   // when you GpuMalloc something and want to free it after the gpu is done put it here.
+   // they will be GpuFree'd when timelineValue is reached.
+   // i think i need one toBeFreedQueue per VkQueue, so in the future if i have multiple queues i need multiple of these as well, i think, idk.
+   //                - apila, 27/10/26
+   toBeFreedQueue:                              Queue(ToBeFreedItem);
+   toBeFreedQueueLock:                          Thread.Mutex;
+}
+
+ToBeFreedItem :: struct {
+   // if semaphore reached this value you can free. semaphore >= timelineValue
+   timelineValue: u64;
+   buffer:        u64;
 }
 
 // stores a single VkCommandBuffer and all the command buffers allocated from it
@@ -341,7 +353,7 @@ VulkanThings :: struct {
 // this is meant to be a TLS storage to use with ApilaDispatch
 CommandPool :: struct {
    commandPool:   VkCommandPool;
-   buffers:       [..] CommandBuffer;
+   buffers:       [..] *CommandBuffer; // must be pointer in case the array grows when a command buffer is in use by another thread.
 }
 
 CommandBuffer :: struct {
@@ -1189,8 +1201,7 @@ BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
    Submit(cmd);
 
    // freeing the buffers after the vkCmdBuildAccelerationStructuresKHR finishes executing
-   DynamicDispatch.DispatchFunction(WaitAndFree, scratchGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
-   DynamicDispatch.DispatchFunction(WaitAndFree, transformGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
+   DeferGpuFree(.[.{ timelineValue = cmd.doneTimelineValue, buffer = scratchGpu }, .{ timelineValue = cmd.doneTimelineValue, buffer = transformGpu }]);
 
    asDeviceAddressInfo: VkAccelerationStructureDeviceAddressInfoKHR = .{
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
@@ -1211,20 +1222,13 @@ BuildBLAS :: (geometries: [] TrianglesInfo) -> AccelerationStructure {
    };
 }
 
-WaitAndFree :: (gpuAddress: u64, semaphore: Semaphore) {
-   info: VkSemaphoreWaitInfo = .{
-      sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-      pNext = null,
-      flags = 0,
-      semaphoreCount = 1,
-      pSemaphores = *semaphore.semaphore,
-      pValues = *semaphore.value,
-   };
+DeferGpuFree :: (items: [] ToBeFreedItem) #expand {
+   Thread.lock(*vk.toBeFreedQueueLock);
+   defer Thread.unlock(*vk.toBeFreedQueueLock);
 
-   result := vkWaitSemaphores(vk.device, *info, U64_MAX);
-   assert(result == VK_SUCCESS, "result: %", result);
-
-   GpuFree(gpuAddress);
+   for items {
+      Enqueue(*vk.toBeFreedQueue, .{ timelineValue = it.timelineValue, buffer = it.buffer });
+   }
 }
 
 InstanceInfo :: struct {
@@ -1364,8 +1368,7 @@ BuildTLAS :: (instances: [] InstanceInfo, waitTimelineValue: u64) -> Acceleratio
    }
 
    // freeing the buffers after the vkCmdBuildAccelerationStructuresKHR finishes executing
-   DynamicDispatch.DispatchFunction(WaitAndFree, instanceDataGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
-   DynamicDispatch.DispatchFunction(WaitAndFree, scratchGpu, .{ semaphore = vk.graphicsQueueTimelineSemaphore.semaphore, value = cmd.doneTimelineValue });
+   DeferGpuFree(.[.{ timelineValue = cmd.doneTimelineValue, buffer = scratchGpu }, .{ timelineValue = cmd.doneTimelineValue, buffer = instanceDataGpu }]);
 
    asDeviceAddressInfo: VkAccelerationStructureDeviceAddressInfoKHR = .{
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
@@ -2368,7 +2371,7 @@ AcquireSwapchainImage :: (window: *Window) {
    return builder_to_string(*builder);
 }();
 
-StartCommandRecording :: () -> *CommandBuffer {
+GetCommandPoolIndex :: () -> int #expand {
    commandPoolIndex: int;
 
    // if this is the main thread
@@ -2380,6 +2383,11 @@ StartCommandRecording :: () -> *CommandBuffer {
       commandPoolIndex = context.thread_index - baseIndex + 1; // +1 because 0 is for the main thread.
    }
 
+   return commandPoolIndex;
+}
+
+StartCommandRecording :: () -> *CommandBuffer {
+   commandPoolIndex := GetCommandPoolIndex();
    commandPool := *vk.commandPools[commandPoolIndex];
 
    // get an available command buffer
@@ -2387,7 +2395,7 @@ StartCommandRecording :: () -> *CommandBuffer {
    vkResult := vkGetSemaphoreCounterValue(vk.device, vk.graphicsQueueTimelineSemaphore.semaphore, *gpuSemaphoreTime);
    assert(vkResult == VK_SUCCESS);
    commandBuffer: *CommandBuffer = null;
-   for * cmd: commandPool.buffers {
+   for cmd: commandPool.buffers {
       if (gpuSemaphoreTime >= cmd.doneTimelineValue) {
          commandBuffer = cmd;
          break;
@@ -2396,7 +2404,8 @@ StartCommandRecording :: () -> *CommandBuffer {
 
    // allocate a new command buffer since all of them are busy
    if (commandBuffer == null) {
-      commandBuffer = array_add(*commandPool.buffers);
+      commandBuffer = New(CommandBuffer);
+      array_add(*commandPool.buffers, commandBuffer);
 
       allocateInfo: VkCommandBufferAllocateInfo = .{
          sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -2408,7 +2417,29 @@ StartCommandRecording :: () -> *CommandBuffer {
 
       vkResult = vkAllocateCommandBuffers(vk.device, *allocateInfo, *commandBuffer.cmd);
       assert(vkResult == VK_SUCCESS);
-      VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_COMMAND_BUFFER, xx commandBuffer.cmd, tprint("vk.commandPools[%].buffers[%] command buffer", context.thread_index, commandPool.buffers.count - 1));
+      VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_COMMAND_BUFFER, xx commandBuffer.cmd, tprint("vk.commandPools[%].buffers[%] command buffer", commandPoolIndex, commandPool.buffers.count - 1));
+   }
+
+   // freeing buffers in toBeFreedQueue
+   {
+      Thread.lock(*vk.toBeFreedQueueLock);
+      defer Thread.unlock(*vk.toBeFreedQueueLock);
+
+      while (true) {
+         ok, item := Peek(*vk.toBeFreedQueue);
+         if (!ok) {
+            break;
+         }
+
+         if (item.timelineValue > gpuSemaphoreTime) {
+            break;
+         }
+
+         ok = Dequeue(*vk.toBeFreedQueue);
+         assert(ok);
+
+         GpuFree(item.buffer);
+      }
    }
 
    beginInfo: VkCommandBufferBeginInfo = .{
@@ -2970,7 +3001,7 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       }
    }
 
-   vk.commandPools = NewArray(vk.threads.threadCount + 1, CommandPool); // not a leak. vk is a global thingy
+   vk.commandPools = NewArray(vk.threads.threadCount + 1, ApilaDispatch.TLSItem(CommandPool)); // not a leak. vk is a global thingy
    for 0..vk.commandPools.count - 1 {
       vk.commandPools[it].commandPool = CreateCommandPool(vk.graphicsQueueFamilyIndexWithPresentSupport);
    }
@@ -3005,7 +3036,7 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       InitDescriptorHeapAllocator(*vk.samplerHeapAllocator, vk.samplerHeapSize - xx vk.descriptorHeapProperties.minSamplerHeapReservedRange);
    }
 
-   DynamicDispatch.Initialize();
+   Thread.init(*vk.toBeFreedQueueLock, "toBeFreedQueueLock");
 
    return window;
 }
