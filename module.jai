@@ -318,11 +318,11 @@ VulkanThings :: struct {
    // the xDescriptorHeapSize fields contain the size of the whole heap including the driver reserved range
    // so the user heap ends at xDescriptorHeapSize - minxHeapReservedRange
    //
-   resourceHeap:                                struct { cpu: *void; gpu: GpuPointer(void); };
+   resourceHeap:                                struct { cpu: *void; gpu: u64; };
    resourceHeapSize:                            int;
    imageDescriptorStride:                       int; // aligned size
    accelerationStructureDescriptorStride:       int; // aligned size
-   samplerHeap:                                 struct { cpu: *void; gpu: GpuPointer(void); };
+   samplerHeap:                                 struct { cpu: *void; gpu: u64; };
    samplerHeapSize:                             int;
    samplerDescriptorStride:                     int; // aligned size
    resourceHeapAllocator:                       DescriptorHeapAllocator;
@@ -345,7 +345,7 @@ VulkanThings :: struct {
 ToBeFreedItem :: struct {
    // if semaphore reached this value you can free. semaphore >= timelineValue
    timelineValue: u64;
-   buffer:        GpuPointer(void);
+   buffer:        u64;
 }
 
 // stores a single VkCommandBuffer and all the command buffers allocated from it
@@ -650,7 +650,7 @@ GetAllocationInfo :: (address: u64) -> AllocationInfo #expand {
    return allocationInfo;
 }
 
-CopyImageToBuffer :: (cmd: *CommandBuffer, source: Image, destination: GpuPointer) {
+CopyImageToBuffer :: (cmd: *CommandBuffer, source: Image, destination: u64) {
    size := source.description.size;
    byteSize := FormatTexelSize(source.description.format) * size[0] * size[1] * size[2] * source.description.arrayLayers;
 
@@ -684,12 +684,12 @@ CopyImageToBuffer :: (cmd: *CommandBuffer, source: Image, destination: GpuPointe
 }
 
 // copies the whole image
-CopyToImage :: (cmd: *CommandBuffer, source: GpuPointer, destination: Image) {
+CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image) {
    CopyToImage(cmd, source, destination, .[0, 0, 0], destination.description.size);
 }
 
 // source is a gpu pointer
-CopyToImage :: (cmd: *CommandBuffer, source: GpuPointer, destination: Image, offset: [3] s32, extent: [3] u32) {
+CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image, offset: [3] s32, extent: [3] u32) {
    byteSize := FormatTexelSize(destination.description.format) * extent[0] * extent[1] * extent[2] * destination.description.arrayLayers;
 
    region: VkDeviceMemoryImageCopyKHR = .{
@@ -721,7 +721,7 @@ CopyToImage :: (cmd: *CommandBuffer, source: GpuPointer, destination: Image, off
    vkCmdCopyMemoryToImageKHR(cmd.cmd, *copyInfo);
 }
 
-DispatchMesh :: (cmd: *CommandBuffer, taskDataPointer: GpuPointer, meshDataPointer: GpuPointer, fragmentDataPointer: GpuPointer, x: u32, y: u32, z: u32) {
+DispatchMesh :: (cmd: *CommandBuffer, taskDataPointer: u64, meshDataPointer: u64, fragmentDataPointer: u64, x: u32, y: u32, z: u32) {
    data := u64.[
       taskDataPointer,
       meshDataPointer,
@@ -846,7 +846,7 @@ DestroyImage :: (image: Image) {
    vkDestroyImage(vk.device, image.image, null);
 }
 
-CreateImage :: (gpuPointer: GpuPointer, description: ImageDescription, debugName := "") -> Image {
+CreateImage :: (gpuPointer: u64, description: ImageDescription, debugName := "") -> Image {
    allocationInfo := GetAllocationInfo(gpuPointer);
 
    imageCreateInfo := ImageDescriptionToVkImageCreateInfo(description);
@@ -1193,8 +1193,8 @@ GetTLASSizes :: (description: TLASDescription) -> AccelerationStructureSizes {
 
 CreateBLAS :: #bake_arguments CreateAccelerationStructure(type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
 CreateTLAS :: #bake_arguments CreateAccelerationStructure(type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR);
-CreateAccelerationStructure :: (buffer: GpuPointer, size: int, type: VkAccelerationStructureTypeKHR) -> AccelerationStructure {
-   assert(buffer != null);
+CreateAccelerationStructure :: (buffer: u64, size: int, type: VkAccelerationStructureTypeKHR) -> AccelerationStructure {
+   assert(buffer != 0);
    assert(size > 0, "size: %", size);
 
    asCreateInfo: VkAccelerationStructureCreateInfo2KHR = .{
@@ -1233,7 +1233,7 @@ CreateAccelerationStructure :: (buffer: GpuPointer, size: int, type: VkAccelerat
 
       asDeviceAddress := vkGetAccelerationStructureDeviceAddressKHR(vk.device, *asDeviceAddressInfo);
       assert(asDeviceAddress != 0);
-      assert(asDeviceAddress == buffer.data);
+      assert(asDeviceAddress == buffer);
    }
 
    return .{
@@ -1256,7 +1256,7 @@ BuildBLASData :: struct {
 // scratchSize at least must be as large as to hold the largest blas scratch size which the user must query with GetBLASSizes.
 BuildBLASes    ::   #bake_arguments BuildOrUpdateBLASes(mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
 UpdateBLASes   ::   #bake_arguments BuildOrUpdateBLASes(mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR);
-BuildOrUpdateBLASes :: (cmd: *CommandBuffer, blases: [] BuildBLASData, scratch: GpuArrayView(u8), mode: VkBuildAccelerationStructureModeKHR) {
+BuildOrUpdateBLASes :: (cmd: *CommandBuffer, blases: [] BuildBLASData, scratch: u64, scratchSize: int, mode: VkBuildAccelerationStructureModeKHR) {
    if (blases.count == 0) {
       return;
    }
@@ -1264,8 +1264,8 @@ BuildOrUpdateBLASes :: (cmd: *CommandBuffer, blases: [] BuildBLASData, scratch: 
    isUpdate := mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
 
    scratchAlignment := vk.accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment;
-   assert(scratch.data != null);
-   assert(scratch.data.data % scratchAlignment == 0, "scratch: %, alignment: %", scratch, scratchAlignment);
+   assert(scratch != 0);
+   assert(scratch % scratchAlignment == 0, "scratch: %, alignment: %", scratch, scratchAlignment);
 
    buildGeometryInfos := NewArray(blases.count, VkAccelerationStructureBuildGeometryInfoKHR,, temp);
    buildRangePointers := NewArray(blases.count, *VkAccelerationStructureBuildRangeInfoKHR,, temp);
@@ -1356,7 +1356,7 @@ BuildOrUpdateBLASes :: (cmd: *CommandBuffer, blases: [] BuildBLASData, scratch: 
 
       assert(it.blas.size >= sizes.accelerationStructureSize, "blas size: %, required: %", it.blas.size, sizes.accelerationStructureSize);
       requiredScratchSize := ifx isUpdate then sizes.updateScratchSize else sizes.buildScratchSize;
-      assert(scratch.count >= requiredScratchSize, "scratch.count: %, required: %", scratch.count, requiredScratchSize);
+      assert(scratchSize >= requiredScratchSize, "scratchSize: %, required: %", scratchSize, requiredScratchSize);
 
       buildScratchSizes[it_index] = requiredScratchSize;
    }
@@ -1367,7 +1367,7 @@ BuildOrUpdateBLASes :: (cmd: *CommandBuffer, blases: [] BuildBLASData, scratch: 
    scratchOffset := 0;
 
    for blases {
-      if (scratchOffset + buildScratchSizes[it_index] > scratch.count) {
+      if (scratchOffset + buildScratchSizes[it_index] > scratchSize) {
          vkCmdBuildAccelerationStructuresKHR(cmd.cmd, xx (it_index - batchStart), buildGeometryInfos.data + batchStart, buildRangePointers.data + batchStart);
 
          GpuBarrier(
@@ -1380,7 +1380,7 @@ BuildOrUpdateBLASes :: (cmd: *CommandBuffer, blases: [] BuildBLASData, scratch: 
          scratchOffset = 0;
       }
 
-      buildGeometryInfos[it_index].scratchData.deviceAddress = scratch.data + scratchOffset;
+      buildGeometryInfos[it_index].scratchData.deviceAddress = scratch + scratchOffset.(u64);
       scratchOffset = Align(scratchOffset + buildScratchSizes[it_index], scratchAlignment.(int));
    }
 
@@ -1398,7 +1398,7 @@ BLASDescription :: struct {
 
 AccelerationStructure :: struct {
    accelerationStructure:  VkAccelerationStructureKHR;
-   address:                GpuPointer(void);
+   address:                u64;
    size:                   int;
    type:                   VkAccelerationStructureTypeKHR;
 }
@@ -1406,17 +1406,17 @@ AccelerationStructure :: struct {
 // can be a submesh too (and usually is), meaning that one instance of this struct doesn't need to contain all the vertices given in the vertexData, vertexCount pair.
 TrianglesInfo :: struct {
    vertexFormat:        VkFormat;
-   vertexData:          GpuPointer(void);
+   vertexData:          u64;
    vertexCount:         int;
    vertexStride:        int;
    indexType:           VkIndexType;
-   indexData:           GpuPointer(void);    // do your offsetting for submeshes here
-                                             // keep the whole vertices buffer as is
+   indexData:           u64;  // do your offsetting for submeshes here
+                              // keep the whole vertices buffer as is
    primitiveCount:      int; // from onwards indexData
 
    // to flatten the hierarchy.
    // null is valid and means identity matrix.
-   transform:           GpuPointer(VkTransformMatrixKHR);
+   transform:           u64; // *VkTransformMatrixKHR
    opaque:              bool = true;
 }
 
@@ -1429,7 +1429,7 @@ DeferGpuFree :: (items: [] ToBeFreedItem) #expand {
    }
 }
 
-MakeTLASInstance :: (transform: VkTransformMatrixKHR, blasAddress: GpuPointer(void), customIndex: u32, mask: u8, sbtRecordOffset: u32, flags: VkGeometryInstanceFlagsKHR) -> VkAccelerationStructureInstanceKHR #expand {
+MakeTLASInstance :: (transform: VkTransformMatrixKHR, blasAddress: u64, customIndex: u32, mask: u8, sbtRecordOffset: u32, flags: VkGeometryInstanceFlagsKHR) -> VkAccelerationStructureInstanceKHR #expand {
    assert(customIndex <= 0x00FF_FFFF, "customIndex: %", customIndex); // 24 bits
    assert(sbtRecordOffset <= 0x00FF_FFFF, "sbtRecordOffset: %", sbtRecordOffset); // 24 bits
    assert(flags <= 0xFF, "flags: %", flags); // 8 bits
@@ -1444,22 +1444,22 @@ MakeTLASInstance :: (transform: VkTransformMatrixKHR, blasAddress: GpuPointer(vo
 
 BuildTLAS   :: #bake_arguments BuildOrUpdateTLAS(mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
 UpdateTLAS  :: #bake_arguments BuildOrUpdateTLAS(mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR);
-BuildOrUpdateTLAS :: (cmd: *CommandBuffer, tlas: AccelerationStructure, description: TLASDescription, instances: GpuArrayView(VkAccelerationStructureInstanceKHR), scratch: GpuPointer(void), mode: VkBuildAccelerationStructureModeKHR) {
+BuildOrUpdateTLAS :: (cmd: *CommandBuffer, tlas: AccelerationStructure, description: TLASDescription, instances: u64 /* *VkAccelerationStructureInstanceKHR */, instanceCount: int, scratch: u64, mode: VkBuildAccelerationStructureModeKHR) {
    assert(mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR || mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR, "mode: %", mode);
    isUpdate := mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
 
    assert(tlas.type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, "type: %", tlas.type);
    assert(!isUpdate || (description.flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR) != 0, "flags: %", description.flags);
-   assert(instances.count > 0, "instances.count: %", instances.count);
-   assert(instances.count <= description.maxInstances, "instances.count: %, maxInstances: %", instances.count, description.maxInstances);
+   assert(instanceCount > 0, "instanceCount: %", instanceCount);
+   assert(instanceCount <= description.maxInstances, "instanceCount: %, maxInstances: %", instanceCount, description.maxInstances);
 
    // instances buffer must be 16 byte aligned
-   assert(instances.data != null);
-   assert(instances.data.data % 16 == 0, "instances: %", instances);
+   assert(instances != 0);
+   assert(instances % 16 == 0, "instances: %", instances);
 
    scratchAlignment := vk.accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment;
-   assert(scratch != null);
-   assert(scratch.data % scratchAlignment == 0, "scratch: %, alignment: %", scratch, scratchAlignment);
+   assert(scratch != 0);
+   assert(scratch % scratchAlignment == 0, "scratch: %, alignment: %", scratch, scratchAlignment);
 
    geometryInfo: VkAccelerationStructureGeometryKHR = .{
       sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
@@ -1470,7 +1470,7 @@ BuildOrUpdateTLAS :: (cmd: *CommandBuffer, tlas: AccelerationStructure, descript
          sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
          pNext = null,
          arrayOfPointers = xx false,
-         data.deviceAddress = instances.data,
+         data.deviceAddress = instances,
       }
    };
 
@@ -1489,7 +1489,7 @@ BuildOrUpdateTLAS :: (cmd: *CommandBuffer, tlas: AccelerationStructure, descript
    };
 
    buildRangeInfo: VkAccelerationStructureBuildRangeInfoKHR = .{
-      primitiveCount = xx instances.count,
+      primitiveCount = xx instanceCount,
       primitiveOffset = 0,
       firstVertex = 0,
       transformOffset = 0,
@@ -1514,7 +1514,7 @@ RayTracingPipeline :: struct {
    missCount:          int;
    hitGroupCount:      int;
 
-   sbtGpu:             GpuPointer(void);
+   sbtGpu:             u64;
    sbtSize:            int;
 
    raygenRegion:       VkStridedDeviceAddressRegionKHR;
@@ -1787,7 +1787,7 @@ CreateRayTracingPipeline :: (raygens: [][] u8, misses: [][] u8, hitGroups: [] Ra
 
    sbtGpu, sbtCpuUntyped := GpuMalloc(sbtSize, shaderGroupBaseAlignment, debugName = "ray tracing sbt", IS_SBT = true);
    sbtCpu := sbtCpuUntyped.(*u8);
-   assert(sbtGpu != null);
+   assert(sbtGpu != 0);
 
    handleStorage := NewArray(groups.count * shaderGroupHandleSize, u8,, temp);
    vkResult = vkGetRayTracingShaderGroupHandlesKHR(vk.device, pipeline, 0, xx groups.count, xx handleStorage.count, handleStorage.data);
@@ -1816,19 +1816,19 @@ CreateRayTracingPipeline :: (raygens: [][] u8, misses: [][] u8, hitGroups: [] Ra
    }
 
    raygenRegion: VkStridedDeviceAddressRegionKHR = .{
-      deviceAddress = GpuCast(sbtGpu, u8) + raygenRegionOffset,
+      deviceAddress = sbtGpu + raygenRegionOffset.(u64),
       stride = xx raygenRecordStride,
       size = xx raygenRegionSize,
    };
 
    missRegion: VkStridedDeviceAddressRegionKHR = .{
-      deviceAddress = ifx misses.count == 0 then .{} else GpuCast(sbtGpu, u8) + missRegionOffset,
+      deviceAddress = ifx misses.count == 0 then 0 else sbtGpu + missRegionOffset.(u64),
       stride = xx missRecordStride,
       size = xx missRegionSize,
    };
 
    hitRegion: VkStridedDeviceAddressRegionKHR = .{
-      deviceAddress = ifx hitGroups.count == 0 then .{} else GpuCast(sbtGpu, u8) + hitRegionOffset,
+      deviceAddress = ifx hitGroups.count == 0 then 0 else sbtGpu + hitRegionOffset.(u64),
       stride = xx hitRecordStride,
       size = xx hitRegionSize,
    };
@@ -1911,7 +1911,7 @@ DestroyAccelerationStructure :: (as: AccelerationStructure) {
       vkDestroyAccelerationStructureKHR(vk.device, as.accelerationStructure, null);
    }
 
-   if (as.address != null) {
+   if (as.address != 0) {
       GpuFree(as.address);
    }
 }
@@ -1921,7 +1921,7 @@ DestroyRayTracingPipeline :: (pipeline: RayTracingPipeline) {
       vkDestroyPipeline(vk.device, pipeline.pipeline, null);
    }
 
-   if (pipeline.sbtGpu != null) {
+   if (pipeline.sbtGpu != 0) {
       GpuFree(pipeline.sbtGpu);
    }
 }
@@ -1940,61 +1940,23 @@ Align :: (value: $T, alignment: T) -> T #modify {
    return (value + alignment - 1) & ~(alignment - 1);
 }
 
-// [] T, for GpuNewArray.
-// i could have used [] T for gpu as well, but it assumes that a pointer is 64 bit which may not be true but idk may be saying that
-// this library only works on 64 bit machines might be okay considering the little convenience i get. idk.
-//             - apila, 28/10/26
-GpuArrayView :: struct($type: Type) {
-   count:   int;
-   data:    GpuPointer(type);
-}
-
-GpuPointer :: struct(type: Type) {
-   #as data: u64;
-
-   #if type != void {
-      #overlay (data) #as asVoid: GpuPointer(void);
-   }
-}
-
-GpuCast :: (p: GpuPointer, $T: Type) -> GpuPointer(T) #expand { return .{p.data}; }
-
-operator + :: (p: GpuPointer, count: int) -> type_of(p) #symmetric { #assert p.type != void; return .{p.data + cast,no_check(u64) (count * cast(int) size_of(p.type))}; }
-operator - :: (p: GpuPointer, count: int) -> type_of(p) { #assert p.type != void; return .{p.data - cast,no_check(u64) (count * cast(int) size_of(p.type))}; }
-operator - :: (a: GpuPointer, b: type_of(a)) -> int { #assert a.type != void; return cast,no_check(int) (a.data - b.data) / cast(int) size_of(a.type); }
-
-// this is for null checks. so i can do:
-//    sbtGpu != null
-// instead of
-//    sbtGpu.data != 0
-// or
-//    sbtGpu != .{}
-operator == :: (p: GpuPointer, n: *void) -> bool #symmetric { assert(n == null); return p.data == 0; }
-
-GpuNew :: ($T: Type, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false, $IS_ACCELERATION_STRUCTURE := false, $IS_GEOMETRY := false, $IS_SBT := false) -> gpu: GpuPointer(T), cpu: *T {
+GpuNew :: ($T: Type, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false, $IS_ACCELERATION_STRUCTURE := false, $IS_GEOMETRY := false, $IS_SBT := false) -> gpu: u64, cpu: *T {
    gpu, cpu := GpuMalloc(size_of(T), alignof(T), type, debugName, IS_DESCRIPTOR_HEAP, IS_ACCELERATION_STRUCTURE, IS_GEOMETRY, IS_SBT);
 
    cpuTyped: *T;
    cpuTyped = cpu;
 
-   gpuTyped: GpuPointer(T);
-   gpuTyped = GpuCast(gpu, T);
-
-   return gpuTyped, cpuTyped;
+   return gpu, cpuTyped;
 }
 
-GpuNewArray :: ($T: Type, count: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false, $IS_ACCELERATION_STRUCTURE := false, $IS_GEOMETRY := false, $IS_SBT := false) -> gpu: GpuArrayView(T), cpu: [] T {
+GpuNewArray :: ($T: Type, count: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false, $IS_ACCELERATION_STRUCTURE := false, $IS_GEOMETRY := false, $IS_SBT := false) -> gpu: u64, cpu: [] T {
    gpu, cpu := GpuMalloc(size_of(T) * count, alignof(T), type, debugName, IS_DESCRIPTOR_HEAP, IS_ACCELERATION_STRUCTURE, IS_GEOMETRY, IS_SBT);
 
    cpuArray: [] T;
    cpuArray.count = count;
    cpuArray.data = cpu;
 
-   gpuArray: GpuArrayView(T);
-   gpuArray.count = count;
-   gpuArray.data = GpuCast(gpu, T);
-
-   return gpuArray, cpuArray;
+   return gpu, cpuArray;
 }
 
 // VK_KHR_device_address_commands flags for addresses that point into a GpuMalloc buffer.
@@ -2003,7 +1965,7 @@ GPU_MALLOC_ADDRESS_FLAGS :: VK_ADDRESS_COMMAND_FULLY_BOUND_BIT_KHR | VK_ADDRESS_
 
 // vma does auto alignment for idk some stuff but not for descriptor heaps
 // so you better specify the alignment when creating a descriptor heap
-GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false, $IS_ACCELERATION_STRUCTURE := false, $IS_GEOMETRY := false, $IS_SBT := false) -> gpu: GpuPointer(void), cpu: *void {
+GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false, $IS_ACCELERATION_STRUCTURE := false, $IS_GEOMETRY := false, $IS_SBT := false) -> gpu: u64, cpu: *void {
    memoryPropertyFlags: VkMemoryPropertyFlags;
    memoryUsage: VmaMemoryUsage;
 
@@ -2065,7 +2027,7 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
    outVmaAllocationInfo: VmaAllocationInfo;
    vkResult := vmaCreateBuffer(vk.vmaAllocator, *bufferCreateInfo, *allocationCreateInfo, *outBuffer, *outVmaAllocation, *outVmaAllocationInfo);
    if (vkResult != VK_SUCCESS) {
-      return .{}, null;
+      return 0, null;
    }
 
    if (debugName.count != 0) {
@@ -2084,7 +2046,7 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
    gpuPointer := vkGetBufferDeviceAddress(vk.device, *addressInfo);
    if gpuPointer == 0 {
        vmaDestroyBuffer(vk.vmaAllocator, outBuffer, outVmaAllocation);
-       return .{}, null;
+       return 0, null;
    }
 
    cpuPointer := ifx type == .Gpu then null else outVmaAllocationInfo.pMappedData;
@@ -2093,7 +2055,7 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
    table_add(*vk.gpuPointerToAllocationInfos, gpuPointer, .{ outBuffer, outVmaAllocation });
    Thread.unlock(*vk.gpuPointerToAllocationInfosMutex);
 
-   return .{gpuPointer}, cpuPointer;
+   return gpuPointer, cpuPointer;
 }
 
 GpuFree :: (gpuPointer: u64) {
@@ -2108,9 +2070,9 @@ GpuFree :: (gpuPointer: u64) {
 
 // you can use memset instead if the buffer is cpu visible
 // size is in bytes
-GpuMemset :: (cmd: *CommandBuffer, destination: GpuPointer(void), value: u32, size: int) {
-   assert(destination != null);
-   assert(destination.data % 4 == 0, "destination: %", destination); // spec requirement
+GpuMemset :: (cmd: *CommandBuffer, destination: u64, value: u32, size: int) {
+   assert(destination != 0);
+   assert(destination % 4 == 0, "destination: %", destination); // spec requirement
    assert(size > 0, "size: %", size);
    assert(size % 4 == 0, "size: %", size); // spec requirement
 
@@ -2120,7 +2082,7 @@ GpuMemset :: (cmd: *CommandBuffer, destination: GpuPointer(void), value: u32, si
 }
 
 // you can use memcpy instead if the buffers are cpu visible.
-GpuMemcpy :: (cmd: *CommandBuffer, source: GpuPointer, destination: GpuPointer, size: int) {
+GpuMemcpy :: (cmd: *CommandBuffer, source: u64, destination: u64, size: int) {
    region: VkDeviceMemoryCopyKHR = .{
       sType = VK_STRUCTURE_TYPE_DEVICE_MEMORY_COPY_KHR,
       pNext = null,
@@ -2280,7 +2242,7 @@ BindComputePipeline :: (cmd: *CommandBuffer, pipeline: ComputePipeline) {
    vkCmdBindShadersEXT(cmd.cmd, 1, *stage, *pipeline.compute);
 }
 
-DispatchCompute :: (cmd: *CommandBuffer, computeDataPointer: GpuPointer, x: u32, y: u32, z: u32) {
+DispatchCompute :: (cmd: *CommandBuffer, computeDataPointer: u64, x: u32, y: u32, z: u32) {
    // this must match ComputePipelinePushData in ApilaSpirv.
    data := u64.[
       computeDataPointer
