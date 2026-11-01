@@ -424,6 +424,8 @@ SamplerInfo :: struct {
    anisotropyEnable:    bool                    = true;
    maxAnisotropy:       float32                 = 8;
    borderColor:         VkBorderColor           = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+   compareEnable:       bool                    = false;
+   compareOp:           VkCompareOp             = VK_COMPARE_OP_LESS_OR_EQUAL;
 }
 
 // globals
@@ -483,13 +485,12 @@ BlitImage :: (cmd: *CommandBuffer, source: Image, destination: Image, sourceMip:
    blitRegion.dstOffsets[1].y = xx CalculateMipmapSize(destination.description.size[1], destinationMip);
    blitRegion.dstOffsets[1].z = xx CalculateMipmapSize(destination.description.size[2], destinationMip);
 
-   // maybe infer the aspectMask from the format?  - apila, 25/08/26
-   blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+   blitRegion.srcSubresource.aspectMask = FormatAspectMask(source.description.format);
    blitRegion.srcSubresource.baseArrayLayer = 0;
    blitRegion.srcSubresource.layerCount = source.description.arrayLayers;
    blitRegion.srcSubresource.mipLevel = xx sourceMip;
 
-   blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+   blitRegion.dstSubresource.aspectMask = FormatAspectMask(destination.description.format);
    blitRegion.dstSubresource.baseArrayLayer = 0;
    blitRegion.dstSubresource.layerCount = source.description.arrayLayers;
    blitRegion.dstSubresource.mipLevel = xx destinationMip;
@@ -635,10 +636,46 @@ FormatTexelSize :: (format: VkFormat) -> int {
       case .VK_FORMAT_R64G64B64A64_SFLOAT;        return 32;
       case .VK_FORMAT_B10G11R11_UFLOAT_PACK32;    return 4;
       case .VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;     return 4;
+
+      case .VK_FORMAT_D16_UNORM;                  return 2;
+      case .VK_FORMAT_X8_D24_UNORM_PACK32;        return 4;
+      case .VK_FORMAT_D32_SFLOAT;                 return 4;
+      case .VK_FORMAT_S8_UINT;                    return 1;
    }
 
    assert(false, "FormatTexelSize: unsupported format %", format);
    return 0;
+}
+
+IsDepthFormat :: (format: VkFormat) -> bool {
+   return (FormatAspectMask(format) & VK_IMAGE_ASPECT_DEPTH_BIT) != 0;
+}
+
+FormatAspectMask :: (format: VkFormat) -> VkImageAspectFlags {
+   if format == {
+      case .VK_FORMAT_D16_UNORM;             #through;
+      case .VK_FORMAT_X8_D24_UNORM_PACK32;   #through;
+      case .VK_FORMAT_D32_SFLOAT;
+         return VK_IMAGE_ASPECT_DEPTH_BIT;
+
+      case .VK_FORMAT_S8_UINT;
+         return VK_IMAGE_ASPECT_STENCIL_BIT;
+
+      case .VK_FORMAT_D16_UNORM_S8_UINT;     #through;
+      case .VK_FORMAT_D24_UNORM_S8_UINT;     #through;
+      case .VK_FORMAT_D32_SFLOAT_S8_UINT;
+         return VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+   }
+
+   return VK_IMAGE_ASPECT_COLOR_BIT;
+}
+
+// vulkan wants exactly one aspect for sampled/storage views and for image to memory copies.
+// for combined depth+stencil formats this picks depth.
+FormatSingleAspect :: (format: VkFormat) -> VkImageAspectFlags {
+   aspect := FormatAspectMask(format);
+   if (aspect & VK_IMAGE_ASPECT_DEPTH_BIT) return VK_IMAGE_ASPECT_DEPTH_BIT;
+   return aspect;
 }
 
 GetAllocationInfo :: (address: u64) -> AllocationInfo #expand {
@@ -650,6 +687,8 @@ GetAllocationInfo :: (address: u64) -> AllocationInfo #expand {
    return allocationInfo;
 }
 
+// if depth+stencil this copies depth. maybe i need a CopyStencilImageToBuffer for stencil (this would be only needed for depth+stencil, if just stencil then this function already works).
+//       - apila, 01/11/26
 CopyImageToBuffer :: (cmd: *CommandBuffer, source: Image, destination: u64) {
    size := source.description.size;
    byteSize := FormatTexelSize(source.description.format) * size[0] * size[1] * size[2] * source.description.arrayLayers;
@@ -662,7 +701,7 @@ CopyImageToBuffer :: (cmd: *CommandBuffer, source: Image, destination: u64) {
       addressRowLength = 0,
       addressImageHeight = 0,
       imageSubresource = .{
-         aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         aspectMask = FormatSingleAspect(source.description.format),
          mipLevel = 0,
          baseArrayLayer = 0,
          layerCount = source.description.arrayLayers,
@@ -688,7 +727,7 @@ CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image) {
    CopyToImage(cmd, source, destination, .[0, 0, 0], destination.description.size);
 }
 
-// source is a gpu pointer
+// read comment of CopyImageToBuffer
 CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image, offset: [3] s32, extent: [3] u32) {
    byteSize := FormatTexelSize(destination.description.format) * extent[0] * extent[1] * extent[2] * destination.description.arrayLayers;
 
@@ -700,7 +739,7 @@ CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image, offset: [3
       addressRowLength = 0,
       addressImageHeight = 0,
       imageSubresource = .{
-         aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         aspectMask = FormatSingleAspect(destination.description.format),
          mipLevel = 0,
          baseArrayLayer = 0,
          layerCount = destination.description.arrayLayers,
@@ -813,7 +852,7 @@ CreateImageViewOverEntireImage :: (image: VkImage, description: ImageDescription
          a = VK_COMPONENT_SWIZZLE_IDENTITY,
       },
       subresourceRange = .{
-         aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, // prolly should store this in ImageDescription
+         aspectMask = FormatAspectMask(description.format),
          baseMipLevel = 0,
          levelCount = description.mipLevels,
          baseArrayLayer = 0,
@@ -870,7 +909,7 @@ CreateImage :: (gpuPointer: u64, description: ImageDescription, debugName := "")
          dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
          image = outImage,
          subresourceRange = .{
-            aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            aspectMask = FormatAspectMask(description.format),
             baseMipLevel = 0,
             levelCount = description.mipLevels,
             baseArrayLayer = 0,
@@ -2302,9 +2341,28 @@ SetDepthWriteEnable :: (cmd: *CommandBuffer, enable: bool) {
    vkCmdSetDepthWriteEnable(cmd.cmd, xx enable);
 }
 
+SetDepthCompareOp :: (cmd: *CommandBuffer, op: VkCompareOp) {
+   vkCmdSetDepthCompareOp(cmd.cmd, op);
+}
+
+SetDepthBiasEnable :: (cmd: *CommandBuffer, enable: bool) {
+   vkCmdSetDepthBiasEnable(cmd.cmd, xx enable);
+}
+
+SetDepthBias :: (cmd: *CommandBuffer, constantFactor: float32, slopeFactor: float32, clamp: float32 = 0) {
+   vkCmdSetDepthBias(cmd.cmd, constantFactor, clamp, slopeFactor);
+}
+
 BeginRenderPass :: (cmd: *CommandBuffer, description: RenderPassDescription) {
-   assert(description.colorTargets.count > 0, "description.colorTargets.count: %", description.colorTargets.count);
+   // depth only passes have no color targets
+   assert(description.colorTargets.count > 0 || description.hasDepthTarget, "render pass needs at least one color target or a depth target");
    assert(!description.hasStencilTarget, "stencil not implemented");
+   if (description.hasDepthTarget) {
+      assert(IsDepthFormat(description.depthTarget.image.description.format), "depth target has non depth format %", description.depthTarget.image.description.format);
+   }
+
+   // the image that decides the render area and the sample count
+   referenceImage := ifx description.colorTargets.count > 0 then description.colorTargets[0].image else description.depthTarget.image;
 
    colorAttachmentInfos := NewArray(description.colorTargets.count, VkRenderingAttachmentInfo,, temp);
    for 0..description.colorTargets.count - 1 {
@@ -2351,8 +2409,8 @@ BeginRenderPass :: (cmd: *CommandBuffer, description: RenderPassDescription) {
 
    // is this is wrong? if the imageView targets a mip level then what?
    // then i think i need to use the extent of the mip level
-   renderAreaWidth := description.colorTargets[0].image.description.size[0];
-   renderAreaHeight := description.colorTargets[0].image.description.size[1];
+   renderAreaWidth := referenceImage.description.size[0];
+   renderAreaHeight := referenceImage.description.size[1];
 
    renderingInfo: VkRenderingInfo = .{
       sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
@@ -2377,13 +2435,15 @@ BeginRenderPass :: (cmd: *CommandBuffer, description: RenderPassDescription) {
    vkCmdSetViewport(cmd.cmd, 0, 1, *viewport);
    vkCmdSetViewportWithCountEXT(cmd.cmd, 1, *viewport);
 
-   colorWriteMask := NewArray(description.colorTargets.count, VkColorComponentFlags,, temp);
-   for 0..colorWriteMask.count - 1 {
-      colorWriteMask[it] = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+   if (description.colorTargets.count > 0) {
+      colorWriteMask := NewArray(description.colorTargets.count, VkColorComponentFlags,, temp);
+      for 0..colorWriteMask.count - 1 {
+         colorWriteMask[it] = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+      }
+      vkCmdSetColorWriteMaskEXT(cmd.cmd, 0, xx colorWriteMask.count, colorWriteMask.data);
    }
-   vkCmdSetColorWriteMaskEXT(cmd.cmd, 0, xx colorWriteMask.count, colorWriteMask.data);
 
-   rasterizationSamples := description.colorTargets[0].image.description.sampleCount;
+   rasterizationSamples := referenceImage.description.sampleCount;
    vkCmdSetRasterizationSamplesEXT(cmd.cmd, xx rasterizationSamples);
 
    sampleMask := u32.[U32_MAX, U32_MAX];
@@ -2939,6 +2999,7 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       fillModeNonSolid = xx true,
       samplerAnisotropy = xx true,
       depthClamp = xx true,
+      depthBiasClamp = xx true,
       shaderInt64 = xx true,
       shaderInt16 = xx true,
    };
@@ -3831,8 +3892,8 @@ WriteSamplerDescriptors :: (startIndex: int, descriptors: [] SamplerInfo) {
          mipLodBias = 0,
          anisotropyEnable = xx it.anisotropyEnable,
          maxAnisotropy = min(it.maxAnisotropy, vk.physicalDeviceProperties.limits.maxSamplerAnisotropy),
-         compareEnable = xx false,
-         compareOp = VK_COMPARE_OP_ALWAYS,
+         compareEnable = xx it.compareEnable,
+         compareOp = it.compareOp,
          minLod = 0,
          maxLod = VK_LOD_CLAMP_NONE, // goes as far as your mipLevels goes
          borderColor = it.borderColor,
@@ -3850,6 +3911,8 @@ WriteSamplerDescriptors :: (startIndex: int, descriptors: [] SamplerInfo) {
    assert(vkResult == VK_SUCCESS);
 }
 
+// this has the same problem. stencils cant be written if the format is depth+stencil. read the comment above CopyImageToBuffer.
+//       - apila, 01/11/26
 WriteImageDescriptors :: (startOffset: int, descriptors: [] Image, type: ImageDescriptorType) {
    resourceDescriptorInfos := NewArray(descriptors.count, VkResourceDescriptorInfoEXT,, temp);
    hostAddressRanges := NewArray(descriptors.count, VkHostAddressRangeEXT,, temp);
@@ -3871,7 +3934,7 @@ WriteImageDescriptors :: (startOffset: int, descriptors: [] Image, type: ImageDe
             a = VK_COMPONENT_SWIZZLE_IDENTITY,
          },
          subresourceRange = .{
-            aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            aspectMask = FormatSingleAspect(it.description.format),
             baseMipLevel = 0,
             levelCount = it.description.mipLevels,
             baseArrayLayer = 0,
