@@ -340,6 +340,10 @@ VulkanThings :: struct {
    //                - apila, 27/10/26
    toBeFreedQueue:                              Queue(ToBeFreedItem);
    toBeFreedQueueLock:                          Thread.Mutex;
+
+   // for GpuTimestamp
+   timestampPeriod:                             float32; // nanoseconds per tick
+   timestampValidBits:                          u32;
 }
 
 ToBeFreedItem :: struct {
@@ -364,7 +368,14 @@ CommandBuffer :: struct {
                               // until it finishes executing. i could have created a command buffer state enum or a boolean
                               // "isRecording" but idk man.
                               //       - apila, 26/03/25
+
+   // GpuTimestamp writes query i to timestampQueryPool and copies it to timestampDestinations[i] in Submit.
+   // the pool is safe to reset when this command buffer is picked again since it is done executing by then.
+   timestampQueryPool:     VkQueryPool; // created on first GpuTimestamp
+   timestampDestinations:  [..] u64;
 }
+
+MAX_TIMESTAMPS_PER_COMMAND_BUFFER :: 256;
 
 // if semaphore is binary then value field is ignored
 // i have this so i can have a unified struct to use in Submit function
@@ -2141,6 +2152,79 @@ GpuMemcpy :: (cmd: *CommandBuffer, source: u64, destination: u64, size: int) {
    vkCmdCopyMemoryKHR(cmd.cmd, *copyInfo);
 }
 
+// writes the gpu clock as a u64 tick count to destination once all the previously submitted work on the queue is done.
+// the value lands in destination when cmd finishes executing (the copy happens at the end of cmd in Submit).
+// can be called inside a render pass.
+// timestamps from different command buffers are comparable. use GpuTicksToMilliseconds on the difference of two timestamps.
+GpuTimestamp :: (cmd: *CommandBuffer, destination: u64) {
+   assert(destination != 0);
+   assert(destination % size_of(u64) == 0, "destination: %", destination); // spec requirement for VK_QUERY_RESULT_64_BIT
+   assert(cmd.timestampDestinations.count < MAX_TIMESTAMPS_PER_COMMAND_BUFFER, "too many timestamps in one command buffer, max: %", MAX_TIMESTAMPS_PER_COMMAND_BUFFER);
+
+   if (cmd.timestampQueryPool == null) {
+      createInfo: VkQueryPoolCreateInfo = .{
+         sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+         pNext = null,
+         queryType = VK_QUERY_TYPE_TIMESTAMP,
+         queryCount = MAX_TIMESTAMPS_PER_COMMAND_BUFFER,
+      };
+
+      vkResult := vkCreateQueryPool(vk.device, *createInfo, null, *cmd.timestampQueryPool);
+      assert(vkResult == VK_SUCCESS);
+      vkResetQueryPool(vk.device, cmd.timestampQueryPool, 0, MAX_TIMESTAMPS_PER_COMMAND_BUFFER);
+   }
+
+   query := cmd.timestampDestinations.count.(u32);
+   array_add(*cmd.timestampDestinations, destination);
+
+   vkCmdWriteTimestamp2(cmd.cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, cmd.timestampQueryPool, query);
+}
+
+// ticks is the difference of two values written by GpuTimestamp
+GpuTicksToMilliseconds :: (ticks: u64) -> float {
+   mask := ifx vk.timestampValidBits >= 64 then U64_MAX else ((1).(u64) << vk.timestampValidBits) - 1;
+   return (ticks & mask).(float) * vk.timestampPeriod / 1_000_000.0;
+}
+
+// called from Submit. copies the timestamps to their destinations, has to be outside of a render pass.
+// done at the end of the command buffer and not in GpuTimestamp because WAIT_BIT would stall the gpu in the middle of the work being measured.
+CopyTimestampsToDestinations :: (cmd: *CommandBuffer) {
+   if (cmd.timestampDestinations.count == 0) {
+      return;
+   }
+
+   // one copy per run of consecutive destinations
+   // each result is a u64 because of VK_QUERY_RESULT_64_BIT
+   runStart := 0;
+   for 1..cmd.timestampDestinations.count {
+      if (it < cmd.timestampDestinations.count && cmd.timestampDestinations[it] == cmd.timestampDestinations[it - 1] + size_of(u64)) {
+         continue;
+      }
+
+      runCount := it - runStart;
+      range: VkStridedDeviceAddressRangeKHR = .{
+         address = cmd.timestampDestinations[runStart],
+         size = xx (runCount * size_of(u64)),
+         stride = size_of(u64),
+      };
+
+      vkCmdCopyQueryPoolResultsToMemoryKHR(
+         cmd.cmd,
+         cmd.timestampQueryPool,
+         xx runStart,
+         xx runCount,
+         *range,
+         GPU_MALLOC_ADDRESS_FLAGS,
+         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT
+      );
+
+      runStart = it;
+   }
+
+   // waiting on a fence doesnt make device writes visible to the host
+   GpuBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_HOST_BIT);
+}
+
 CreateMeshletPipeline :: (taskSpirv: [] u8,
                           meshSpirv: [] u8,
                           fragmentSpirv: [] u8,
@@ -2615,6 +2699,12 @@ StartCommandRecording :: () -> *CommandBuffer {
       VkSetDebugUtilsObjectNameExt(vk.device, VK_OBJECT_TYPE_COMMAND_BUFFER, xx commandBuffer.cmd, tprint("vk.commandPools[%].buffers[%] command buffer", commandPoolIndex, commandPool.buffers.count - 1));
    }
 
+   // the command buffer is done executing so its timestamp queries can be reset from the host
+   if (commandBuffer.timestampDestinations.count > 0) {
+      vkResetQueryPool(vk.device, commandBuffer.timestampQueryPool, 0, xx commandBuffer.timestampDestinations.count);
+      commandBuffer.timestampDestinations.count = 0;
+   }
+
    // freeing buffers in toBeFreedQueue
    {
       Thread.lock(*vk.toBeFreedQueueLock);
@@ -2727,6 +2817,8 @@ SubmitAndPresent :: (cmd: *CommandBuffer, window: *Window) {
 // so you can know which command buffers are finished executing.
 // store their signal value and if the counter exceeds that value then you are free to destroy/reset/reuse that command buffer
 Submit :: (cmd: *CommandBuffer, waitSemaphores: [] Semaphore = .{}, signalSemaphores: [] Semaphore = .{}, fence: VkFence = null) {
+   CopyTimestampsToDestinations(cmd);
+
    vkResult := vkEndCommandBuffer(cmd.cmd);
    assert(vkResult == VK_SUCCESS);
 
@@ -2986,6 +3078,10 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       }
    }
 
+   vk.timestampValidBits = queueFamilyProperties[vk.graphicsQueueFamilyIndexWithPresentSupport].timestampValidBits;
+   assert(vk.timestampValidBits != 0, "graphics queue doesnt support timestamps");
+   vk.timestampPeriod = vk.physicalDeviceProperties.limits.timestampPeriod;
+
    queuePriority := 1.0;
    deviceQueueCreateInfo: VkDeviceQueueCreateInfo = .{
       sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -3082,6 +3178,7 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       bufferDeviceAddress = xx true,
       scalarBlockLayout = xx true,
       shaderInt8 = xx true,
+      hostQueryReset = xx true,
    };
 
    vulkan11Features: VkPhysicalDeviceVulkan11Features = .{
