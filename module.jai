@@ -468,6 +468,61 @@ CalculateMipmapSize :: inline (base: int, mipLevel: int) -> int {
    return max(1, base >> mipLevel);
 }
 
+CalculateMipmapExtent :: (size: [3] u32, mipLevel: int) -> [3] u32 {
+   return .[
+      xx CalculateMipmapSize(size[0], mipLevel),
+      xx CalculateMipmapSize(size[1], mipLevel),
+      xx CalculateMipmapSize(size[2], mipLevel),
+   ];
+}
+
+// number of mip levels for a full mip chain (down to 1x1x1)
+MipLevelCount :: (width: u32, height: u32, depth: u32 = 1) -> u32 {
+   largest := max(max(width, height), depth);
+   count: u32 = 1;
+   while largest > 1 {
+      largest >>= 1;
+      count += 1;
+   }
+   return count;
+}
+
+// fills mips 1..mipLevels-1 from mip 0 by successive blits.
+// this puts barriers before and after itself as well. we dont know what wrote mip 0 (e.g. CopyToImage) or what will read the image afterwards,
+// so they are all commands barriers. thats overkill but mipmaps are generated once, not every frame, so the convenience of not having to put
+// the barriers yourself is worth it.
+GenerateMipmaps :: (cmd: *CommandBuffer, image: Image, filter := VK_FILTER_LINEAR) {
+   assert(image.description.sampleCount == 1);
+
+   formatProperties3: VkFormatProperties3 = .{
+      sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3,
+      pNext = null,
+   };
+
+   formatProperties2: VkFormatProperties2 = .{
+      sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+      pNext = *formatProperties3,
+   };
+
+   vkGetPhysicalDeviceFormatProperties2(vk.physicalDevice, image.description.format, *formatProperties2);
+
+   requiredFeatures := VK_FORMAT_FEATURE_2_BLIT_SRC_BIT | VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
+   if filter == VK_FILTER_LINEAR  requiredFeatures |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+   assert((formatProperties3.optimalTilingFeatures & requiredFeatures) == requiredFeatures, "format % doesnt support blitting with filter %", image.description.format, filter);
+
+   GpuBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+
+   for mip: 1..image.description.mipLevels.(int) - 1 {
+      BlitImage(cmd, image, image, mip - 1, mip, filter);
+
+      if mip != image.description.mipLevels - 1 {
+         GpuBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+      }
+   }
+
+   GpuBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+}
+
 BlitImage :: (cmd: *CommandBuffer, source: Image, destination: Image, sourceMip: int, destinationMip: int, filter: VkFilter) {
    assert(sourceMip < source.description.mipLevels);
    assert(destinationMip < destination.description.mipLevels);
@@ -700,8 +755,10 @@ GetAllocationInfo :: (address: u64) -> AllocationInfo #expand {
 
 // if depth+stencil this copies depth. maybe i need a CopyStencilImageToBuffer for stencil (this would be only needed for depth+stencil, if just stencil then this function already works).
 //       - apila, 01/11/26
-CopyImageToBuffer :: (cmd: *CommandBuffer, source: Image, destination: u64) {
-   size := source.description.size;
+CopyImageToBuffer :: (cmd: *CommandBuffer, source: Image, destination: u64, mip := 0) {
+   assert(mip < source.description.mipLevels);
+
+   size := CalculateMipmapExtent(source.description.size, mip);
    byteSize := FormatTexelSize(source.description.format) * size[0] * size[1] * size[2] * source.description.arrayLayers;
 
    region: VkDeviceMemoryImageCopyKHR = .{
@@ -713,7 +770,7 @@ CopyImageToBuffer :: (cmd: *CommandBuffer, source: Image, destination: u64) {
       addressImageHeight = 0,
       imageSubresource = .{
          aspectMask = FormatSingleAspect(source.description.format),
-         mipLevel = 0,
+         mipLevel = xx mip,
          baseArrayLayer = 0,
          layerCount = source.description.arrayLayers,
       },
@@ -733,13 +790,15 @@ CopyImageToBuffer :: (cmd: *CommandBuffer, source: Image, destination: u64) {
    vkCmdCopyImageToMemoryKHR(cmd.cmd, *copyInfo);
 }
 
-// copies the whole image
-CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image) {
-   CopyToImage(cmd, source, destination, .[0, 0, 0], destination.description.size);
+// copies the whole mip level
+CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image, mip := 0) {
+   CopyToImage(cmd, source, destination, .[0, 0, 0], CalculateMipmapExtent(destination.description.size, mip), mip);
 }
 
 // read comment of CopyImageToBuffer
-CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image, offset: [3] s32, extent: [3] u32) {
+CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image, offset: [3] s32, extent: [3] u32, mip := 0) {
+   assert(mip < destination.description.mipLevels);
+
    byteSize := FormatTexelSize(destination.description.format) * extent[0] * extent[1] * extent[2] * destination.description.arrayLayers;
 
    region: VkDeviceMemoryImageCopyKHR = .{
@@ -751,7 +810,7 @@ CopyToImage :: (cmd: *CommandBuffer, source: u64, destination: Image, offset: [3
       addressImageHeight = 0,
       imageSubresource = .{
          aspectMask = FormatSingleAspect(destination.description.format),
-         mipLevel = 0,
+         mipLevel = xx mip,
          baseArrayLayer = 0,
          layerCount = destination.description.arrayLayers,
       },
