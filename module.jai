@@ -503,7 +503,7 @@ BlitImage :: (cmd: *CommandBuffer, source: Image, destination: Image, sourceMip:
 
    blitRegion.dstSubresource.aspectMask = FormatAspectMask(destination.description.format);
    blitRegion.dstSubresource.baseArrayLayer = 0;
-   blitRegion.dstSubresource.layerCount = source.description.arrayLayers;
+   blitRegion.dstSubresource.layerCount = destination.description.arrayLayers;
    blitRegion.dstSubresource.mipLevel = xx destinationMip;
 
    blitInfo: VkBlitImageInfo2 = .{
