@@ -3070,6 +3070,7 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       dynamicRendering = xx true,
       synchronization2 = xx true,
       maintenance4 = xx true, // stupidass compiler optimizations
+      shaderDemoteToHelperInvocation = xx true,
    };
 
    vulkan12Features: VkPhysicalDeviceVulkan12Features = .{
