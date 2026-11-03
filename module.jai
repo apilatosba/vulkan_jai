@@ -848,6 +848,34 @@ DispatchMesh :: (cmd: *CommandBuffer, taskDataPointer: u64, meshDataPointer: u64
    vkCmdDrawMeshTasksEXT(cmd.cmd, x, y, z);
 }
 
+// argumentsPointer points to an IndirectDispatchArguments.
+// the barrier between the shader that writes the arguments and this call needs VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT in its after stage.
+DispatchMeshIndirect :: (cmd: *CommandBuffer, taskDataPointer: u64, meshDataPointer: u64, fragmentDataPointer: u64, argumentsPointer: u64) {
+   data := u64.[
+      taskDataPointer,
+      meshDataPointer,
+      fragmentDataPointer
+   ];
+
+   pushDataInfo: VkPushDataInfoEXT = .{
+      sType = VK_STRUCTURE_TYPE_PUSH_DATA_INFO_EXT,
+      pNext = null,
+      offset = 0,
+      data = .{ data.data, data.count * size_of(u64) }
+   };
+
+   drawIndirectInfo: VkDrawIndirect2InfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_DRAW_INDIRECT_2_INFO_KHR,
+      pNext = null,
+      addressRange = .{ address = argumentsPointer, size = size_of(IndirectDispatchArguments), stride = size_of(IndirectDispatchArguments) },
+      addressFlags = GPU_MALLOC_ADDRESS_FLAGS,
+      drawCount = 1,
+   };
+
+   vkCmdPushDataEXT(cmd.cmd, *pushDataInfo);
+   vkCmdDrawMeshTasksIndirect2EXT(cmd.cmd, *drawIndirectInfo);
+}
+
 BindMeshletPipeline :: (cmd: *CommandBuffer, pipeline: MeshletPipeline) {
    // Validation Error: [ VUID_Undefined ] | MessageID = 0x79de34d4
    // vkCmdDrawMeshTasksEXT(): There is no graphics pipeline bound and vkCmdBindShadersEXT() was not called with stage VK_SHADER_STAGE_VERTEX_BIT and either VK_NULL_HANDLE
@@ -2068,6 +2096,12 @@ GpuNewArray :: ($T: Type, count: int, type: MemoryType = .Default, debugName := 
    return gpu, cpuArray;
 }
 
+// workgroup counts for DispatchComputeIndirect and DispatchMeshIndirect.
+// same layout as VkDispatchIndirectCommand and VkDrawMeshTasksIndirectCommandEXT.
+IndirectDispatchArguments :: struct {
+   x, y, z: u32;
+}
+
 // VK_KHR_device_address_commands flags for addresses that point into a GpuMalloc buffer.
 // GpuMalloc buffers are never sparse and always have VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
 GPU_MALLOC_ADDRESS_FLAGS :: VK_ADDRESS_COMMAND_FULLY_BOUND_BIT_KHR | VK_ADDRESS_COMMAND_STORAGE_BUFFER_USAGE_BIT_KHR;
@@ -2099,7 +2133,7 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
       sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       pNext = null,
       size = xx size,
-      usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+      usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
       sharingMode = VK_SHARING_MODE_EXCLUSIVE, // only one queue family can use this buffer at a time.
    };
 
@@ -2439,6 +2473,32 @@ DispatchCompute :: (cmd: *CommandBuffer, computeDataPointer: u64, x: u32, y: u32
 
    vkCmdPushDataEXT(cmd.cmd, *pushDataInfo);
    vkCmdDispatch(cmd.cmd, x, y, z);
+}
+
+// argumentsPointer points to an IndirectDispatchArguments.
+// the barrier between the shader that writes the arguments and this call needs VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT in its after stage.
+DispatchComputeIndirect :: (cmd: *CommandBuffer, computeDataPointer: u64, argumentsPointer: u64) {
+   // this must match ComputePipelinePushData in ApilaSpirv.
+   data := u64.[
+      computeDataPointer
+   ];
+
+   pushDataInfo: VkPushDataInfoEXT = .{
+      sType = VK_STRUCTURE_TYPE_PUSH_DATA_INFO_EXT,
+      pNext = null,
+      offset = 0,
+      data = .{ data.data, data.count * size_of(u64) }
+   };
+
+   dispatchIndirectInfo: VkDispatchIndirect2InfoKHR = .{
+      sType = VK_STRUCTURE_TYPE_DISPATCH_INDIRECT_2_INFO_KHR,
+      pNext = null,
+      addressRange = .{ address = argumentsPointer, size = size_of(IndirectDispatchArguments) },
+      addressFlags = GPU_MALLOC_ADDRESS_FLAGS,
+   };
+
+   vkCmdPushDataEXT(cmd.cmd, *pushDataInfo);
+   vkCmdDispatchIndirect2KHR(cmd.cmd, *dispatchIndirectInfo);
 }
 
 DestroyComputePipeline :: (pipeline: ComputePipeline) {
