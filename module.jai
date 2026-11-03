@@ -1922,7 +1922,7 @@ CreateRayTracingPipeline :: (raygens: [][] u8, misses: [][] u8, hitGroups: [] Ra
    callableRegionSize := 0;
    sbtSize := callableRegionOffset + callableRegionSize;
 
-   sbtGpu, sbtCpuUntyped := GpuMalloc(sbtSize, shaderGroupBaseAlignment, debugName = "ray tracing sbt", IS_SBT = true);
+   sbtGpu, sbtCpuUntyped := GpuMalloc(sbtSize, shaderGroupBaseAlignment, debugName = "ray tracing sbt");
    sbtCpu := sbtCpuUntyped.(*u8);
    assert(sbtGpu != 0);
 
@@ -2077,8 +2077,8 @@ Align :: (value: $T, alignment: T) -> T #modify {
    return (value + alignment - 1) & ~(alignment - 1);
 }
 
-GpuNew :: ($T: Type, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false, $IS_ACCELERATION_STRUCTURE := false, $IS_GEOMETRY := false, $IS_SBT := false) -> gpu: u64, cpu: *T {
-   gpu, cpu := GpuMalloc(size_of(T), alignof(T), type, debugName, IS_DESCRIPTOR_HEAP, IS_ACCELERATION_STRUCTURE, IS_GEOMETRY, IS_SBT);
+GpuNew :: ($T: Type, type: MemoryType = .Default, debugName := "") -> gpu: u64, cpu: *T {
+   gpu, cpu := GpuMalloc(size_of(T), alignof(T), type, debugName);
 
    cpuTyped: *T;
    cpuTyped = cpu;
@@ -2086,8 +2086,8 @@ GpuNew :: ($T: Type, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTO
    return gpu, cpuTyped;
 }
 
-GpuNewArray :: ($T: Type, count: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false, $IS_ACCELERATION_STRUCTURE := false, $IS_GEOMETRY := false, $IS_SBT := false) -> gpu: u64, cpu: [] T {
-   gpu, cpu := GpuMalloc(size_of(T) * count, alignof(T), type, debugName, IS_DESCRIPTOR_HEAP, IS_ACCELERATION_STRUCTURE, IS_GEOMETRY, IS_SBT);
+GpuNewArray :: ($T: Type, count: int, type: MemoryType = .Default, debugName := "") -> gpu: u64, cpu: [] T {
+   gpu, cpu := GpuMalloc(size_of(T) * count, alignof(T), type, debugName);
 
    cpuArray: [] T;
    cpuArray.count = count;
@@ -2108,7 +2108,7 @@ GPU_MALLOC_ADDRESS_FLAGS :: VK_ADDRESS_COMMAND_FULLY_BOUND_BIT_KHR | VK_ADDRESS_
 
 // vma does auto alignment for idk some stuff but not for descriptor heaps
 // so you better specify the alignment when creating a descriptor heap
-GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false, $IS_ACCELERATION_STRUCTURE := false, $IS_GEOMETRY := false, $IS_SBT := false) -> gpu: u64, cpu: *void {
+GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName := "", $IS_DESCRIPTOR_HEAP := false) -> gpu: u64, cpu: *void {
    memoryPropertyFlags: VkMemoryPropertyFlags;
    memoryUsage: VmaMemoryUsage;
 
@@ -2133,29 +2133,27 @@ GpuMalloc :: (size: int, alignment: int, type: MemoryType = .Default, debugName 
       sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       pNext = null,
       size = xx size,
-      usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+      usage =  VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+               VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+               VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+               VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
+               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+               VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR,
       sharingMode = VK_SHARING_MODE_EXCLUSIVE, // only one queue family can use this buffer at a time.
    };
 
+   // maybe a little word about usage flags:
+   // i used to have boolean flags similar to IS_DESCRIPTOR_HEAP, for other stuff too (IS_SBT, IS_GEOMETRY, IS_ACCELERATION_STRUCTURE)
+   // i benchmarked and whether you enable it always or just for the necessary buffers makes absolutely no difference in performance (in radv, nvidia might be different idk)
+   // so i decided to drop this to make the api cleaner. i kept the IS_DESCRIPTOR_HEAP because if you enable it on a random buffer it crashes the radv with the following message:
+   //    radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.
+   // i have no idea what that means. i didnt try to investigate when it crashes, what is the exact cause, i dont really care. also descriptor heap is always managed by the library not by the user
+   // so it is nice the user will never need to set flags again
+   //       - apila, 03/11/26
    #if (IS_DESCRIPTOR_HEAP) {
       bufferCreateInfo.usage |= VK_BUFFER_USAGE_DESCRIPTOR_HEAP_BIT_EXT;
-   }
-
-   #if (IS_ACCELERATION_STRUCTURE) {
-      bufferCreateInfo.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
-   }
-
-   //
-   // idk maybe IS_GEOMETRY is not a good name. the name IS_GEOMETRY hints that this library is purely for ray tracing
-   // which is not true. so lets say you use the rasterizer and you set this flag anyways, not a big deal surely Clueless
-   //       - apila, 26/06/26
-   //
-   #if (IS_GEOMETRY) {
-      bufferCreateInfo.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-   }
-
-   #if (IS_SBT) {
-      bufferCreateInfo.usage |= VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
    }
 
    allocationCreateInfo: VmaAllocationCreateInfo = .{
