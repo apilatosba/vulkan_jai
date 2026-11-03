@@ -3031,6 +3031,10 @@ GetTime :: () -> float64 {
    return glfwGetTime();
 }
 
+SetWindowShouldClose :: (window: *Window, close: bool) {
+   glfwSetWindowShouldClose(window.window, xx close);
+}
+
 WindowShouldClose :: (window: *Window) -> bool {
    return xx glfwWindowShouldClose(window.window);
 }
