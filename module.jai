@@ -2414,6 +2414,33 @@ WaitDevice :: () {
    assert(result == VK_SUCCESS, "result: %", result);
 }
 
+// semaphoes must be timeline semaphores.
+WaitSemaphores :: (semaphores: ..Semaphore, waitAll := true, timeoutNanoseconds: u64 = U64_MAX) -> bool {
+   if (semaphores.count == 0) {
+      return true; // vulkan requires semaphoreCount > 0
+   }
+
+   handles := NewArray(semaphores.count, VkSemaphore,, temp);
+   values := NewArray(semaphores.count, u64,, temp);
+   for semaphores {
+      handles[it_index] = it.semaphore;
+      values[it_index] = it.value;
+   }
+
+   waitInfo: VkSemaphoreWaitInfo = .{
+      sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+      pNext = null,
+      flags = ifx waitAll then 0 else VK_SEMAPHORE_WAIT_ANY_BIT,
+      semaphoreCount = xx semaphores.count,
+      pSemaphores = handles.data,
+      pValues = values.data,
+   };
+
+   vkResult := vkWaitSemaphores(vk.device, *waitInfo, timeoutNanoseconds);
+   assert(vkResult == VK_SUCCESS || vkResult == VK_TIMEOUT, "vkResult: %", vkResult);
+   return vkResult == VK_SUCCESS;
+}
+
 DestroyMeshletPipeline :: (using pipeline: MeshletPipeline) {
    if (task != null) {
       vkDestroyShaderEXT(vk.device, task, null);
