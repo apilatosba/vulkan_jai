@@ -280,6 +280,7 @@ Window :: struct {
    // swapchain related things
    swapchain:                 VkSwapchainKHR;
    swapchainImages:           [] Image;
+   presentMode:               VkPresentModeKHR;
 
    // per frame buffers for the swapchain
    acquireImageSemaphores:    [] VkSemaphore;   // index using cpuFrameTimeline % count
@@ -299,12 +300,12 @@ VulkanThings :: struct {
    device:                                      VkDevice;
    vmaAllocator:                                VmaAllocator;
    surfaceFormat:                               VkSurfaceFormatKHR;
-   presentMode:                                 VkPresentModeKHR;
+   availablePresentModes:                       [] VkPresentModeKHR; // if the user wants to change the present mode, i dont need to requery.
    commandPools:                                [] ApilaDispatch.TLSItem(CommandPool);   // one pool per thread. thread local storages. 0th index is for the main thread.
                                                                   //
                                                                   // this field is meant to be global but it is fine to keep it here
                                                                   // since the whole struct has only one global instance.
-   graphicsQueue:                               VkQueue;    // TODO add a transfer queue if youd like
+   graphicsQueue:                               VkQueue;
    graphicsQueueTimelineSemaphore:              Semaphore;
    graphicsQueueSubmitMutex:                    Thread.Mutex;
 
@@ -3390,20 +3391,18 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
    presentModeCount: u32;
    vkResult = vkGetPhysicalDeviceSurfacePresentModesKHR(vk.physicalDevice, window.surface, *presentModeCount, null);
    assert(vkResult == VK_SUCCESS);
-   presentModes: [] VkPresentModeKHR;
-   presentModes.count = presentModeCount;
-   presentModes.data = temporary_alloc(presentModeCount * size_of(VkPresentModeKHR));
+   vk.availablePresentModes = NewArray(presentModeCount, VkPresentModeKHR);
 
    if (presentModeCount != 0) {
-      vkResult = vkGetPhysicalDeviceSurfacePresentModesKHR(vk.physicalDevice, window.surface, *presentModeCount, presentModes.data);
+      vkResult = vkGetPhysicalDeviceSurfacePresentModesKHR(vk.physicalDevice, window.surface, *presentModeCount, vk.availablePresentModes.data);
       assert(vkResult == VK_SUCCESS);
    }
 
-   isSwapChainAdequate: bool = surfaceFormats.count != 0 && presentModes.count != 0;
+   isSwapChainAdequate: bool = surfaceFormats.count != 0 && vk.availablePresentModes.count != 0;
    assert(isSwapChainAdequate, "Swapchain is not adequate");
 
    vk.surfaceFormat = ChooseSwapSurfaceFormat(surfaceFormats);
-   vk.presentMode = ChooseSwapPresentMode(presentModes);
+   window.presentMode = ChooseSwapPresentMode(vk.availablePresentModes);
 
    vk.threads = ApilaDispatch.InitializeThreads();
 
@@ -3497,6 +3496,23 @@ CreateCommandPool :: (queueFamilyIndex: u32) -> VkCommandPool {
    assert(vkResult == VK_SUCCESS);
 
    return result;
+}
+
+// this is a bit high level function. this also recreates the swapchain. call this function between frames, not during you use a swapchain image.
+// returning true means the present mode is the one desired, false otherwise.
+//       - apila, 04/11/26
+SetPresentMode :: (window: *Window, mode: VkPresentModeKHR) -> bool {
+   if (window.presentMode == mode) {
+      return true;
+   }
+
+   if (!array_find(vk.availablePresentModes, mode)) {
+      return false;
+   }
+
+   window.presentMode = mode;
+   RecreateSwapchain(window);
+   return true;
 }
 
 ChooseSwapPresentMode :: (availablePresentModes: [] VkPresentModeKHR) -> VkPresentModeKHR {
@@ -3600,6 +3616,7 @@ DestroySwapchain :: (window: *Window) {
 
 CreateWindow :: (width: int, height: int, title: string) -> *Window {
    window := CreateWindowThePartBeforeDeviceCreation(width, height, title);
+   window.presentMode = ChooseSwapPresentMode(vk.availablePresentModes);
    CreateSwapchain(window);
    return window;
 }
@@ -3631,7 +3648,7 @@ CreateSwapchain :: (window: *Window) {
       pQueueFamilyIndices = null,
       preTransform = surfaceCapabilities.currentTransform,
       compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-      presentMode = vk.presentMode,
+      presentMode = window.presentMode,
       clipped = xx true,
       oldSwapchain = null,
    };
