@@ -3996,6 +3996,34 @@ IsKeyPressed :: (window: *Window, key: KeyboardKey) -> bool {
    return window.input.keyboard.pressedKeys[key] > 0;
 }
 
+IsKeyReleased :: (window: *Window, key: KeyboardKey) -> bool {
+   return window.input.keyboard.releasedKeys[key] > 0;
+}
+
+IsMouseButtonDown :: (window: *Window, button: MouseButton) -> bool {
+   return window.input.mouse.buttonsDown[button];
+}
+
+IsMouseButtonPressed :: (window: *Window, button: MouseButton) -> bool {
+   return window.input.mouse.buttonsPressed[button] > 0;
+}
+
+IsMouseButtonReleased :: (window: *Window, button: MouseButton) -> bool {
+   return window.input.mouse.buttonsReleased[button] > 0;
+}
+
+GetMousePosition :: (window: *Window) -> Vector2 {
+   return window.input.mouse.position;
+}
+
+GetMouseDelta :: (window: *Window) -> Vector2 {
+   return window.input.mouse.position - window.input.mouse.positionLastFrame;
+}
+
+GetMouseWheel :: (window: *Window) -> float {
+   return window.input.mouse.wheel;
+}
+
 ChoosePhysicalDevice :: (instance: VkInstance) -> VkPhysicalDevice {
    assert(instance != null);
 
