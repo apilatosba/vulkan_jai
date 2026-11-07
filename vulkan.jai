@@ -3999,6 +3999,10 @@ GetClipboardText :: () -> string {
    return to_string(cString);
 }
 
+GetCharacterQueue :: (window: *Window) -> Queue(u32) {
+   return window.input.keyboard.characterQueue;
+}
+
 IsKeyDown :: (window: *Window, key: KeyboardKey) -> bool {
    return window.input.keyboard.keysDown[key];
 }
