@@ -1037,39 +1037,6 @@ CreateImage :: (gpuPointer: u64, description: ImageDescription, debugName := "")
    };
 }
 
-// if you dont call this you cant access to the descriptor heaps in the shaders.
-// i dont do this automatically in StartCommandRecording because the command buffer may not use the descriptor heaps at all and this is often the case.
-// idk how much of an api overhead it is to call this function. considering the convinience we get from this being automatically called in the StartCommandRecording,
-// it might worth the performance penalty of calling this for every command buffer ever recorded. idk tho and didnt create a benchmark so im gonna keep this design for now
-//    - apila, 29/03/26
-ActivateDescriptorHeaps :: (cmd: *CommandBuffer) {
-   resourceHeapBindInfo: VkBindHeapInfoEXT = .{
-      sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_EXT,
-      pNext = null,
-      heapRange = .{
-         address = vk.resourceHeap.gpu,
-         size = xx vk.resourceHeapSize,
-      },
-      reservedRangeOffset = xx vk.resourceHeapSize - vk.descriptorHeapProperties.minResourceHeapReservedRange,
-      reservedRangeSize = vk.descriptorHeapProperties.minResourceHeapReservedRange,
-   };
-
-   vkCmdBindResourceHeapEXT(cmd.cmd, *resourceHeapBindInfo);
-
-   samplerHeapBindInfo: VkBindHeapInfoEXT = .{
-      sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_EXT,
-      heapRange = .{
-         address = vk.samplerHeap.gpu,
-         size = xx vk.samplerHeapSize,
-      },
-      reservedRangeOffset = xx vk.samplerHeapSize - vk.descriptorHeapProperties.minSamplerHeapReservedRange,
-      reservedRangeSize = vk.descriptorHeapProperties.minSamplerHeapReservedRange,
-   };
-
-   vkCmdBindSamplerHeapEXT(cmd.cmd, *samplerHeapBindInfo);
-}
-
-
 // used in WriteImageDescriptors, VkResourceDescriptorInfoEXT.
 // if an image used in both ways then you have to create two descriptors for the same image.
 // for example a compute shader uses the image as Storage and then later you use it in a fragment shader as Sampled.
@@ -2869,6 +2836,7 @@ StartCommandRecording :: () -> *CommandBuffer {
 
    commandBuffer.doneTimelineValue = U64_MAX;
 
+   ActivateDescriptorHeaps(commandBuffer);
    return commandBuffer;
 }
 
@@ -4352,4 +4320,42 @@ GenerateDispatchRenderFunction :: (parameterCount: int) -> string {
    print_to_builder(*b, "}\n");
 
    return builder_to_string(*b);
+}
+
+#scope_module
+
+// if you dont call this you cant access to the descriptor heaps in the shaders.
+// i dont do this automatically in StartCommandRecording because the command buffer may not use the descriptor heaps at all and this is often the case.
+// idk how much of an api overhead it is to call this function. considering the convinience we get from this being automatically called in the StartCommandRecording,
+// it might worth the performance penalty of calling this for every command buffer ever recorded. idk tho and didnt create a benchmark so im gonna keep this design for now
+//    - apila, 29/03/26
+//
+// i tested it today and to my surpise it was even just a little faster to enable this at every command buffer recorded (amd radv, maybe nvidia different idk). i mean idk, it is probably a noise.
+// this function now automatically called.
+//    - apila, 07/11/26
+ActivateDescriptorHeaps :: (cmd: *CommandBuffer) {
+   resourceHeapBindInfo: VkBindHeapInfoEXT = .{
+      sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_EXT,
+      pNext = null,
+      heapRange = .{
+         address = vk.resourceHeap.gpu,
+         size = xx vk.resourceHeapSize,
+      },
+      reservedRangeOffset = xx vk.resourceHeapSize - vk.descriptorHeapProperties.minResourceHeapReservedRange,
+      reservedRangeSize = vk.descriptorHeapProperties.minResourceHeapReservedRange,
+   };
+
+   vkCmdBindResourceHeapEXT(cmd.cmd, *resourceHeapBindInfo);
+
+   samplerHeapBindInfo: VkBindHeapInfoEXT = .{
+      sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_EXT,
+      heapRange = .{
+         address = vk.samplerHeap.gpu,
+         size = xx vk.samplerHeapSize,
+      },
+      reservedRangeOffset = xx vk.samplerHeapSize - vk.descriptorHeapProperties.minSamplerHeapReservedRange,
+      reservedRangeSize = vk.descriptorHeapProperties.minSamplerHeapReservedRange,
+   };
+
+   vkCmdBindSamplerHeapEXT(cmd.cmd, *samplerHeapBindInfo);
 }
