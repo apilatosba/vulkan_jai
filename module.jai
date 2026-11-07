@@ -322,7 +322,6 @@ VulkanThings :: struct {
    resourceHeap:                                struct { cpu: *void; gpu: u64; };
    resourceHeapSize:                            int;
    imageDescriptorStride:                       int; // aligned size
-   accelerationStructureDescriptorStride:       int; // aligned size
    samplerHeap:                                 struct { cpu: *void; gpu: u64; };
    samplerHeapSize:                             int;
    samplerDescriptorStride:                     int; // aligned size
@@ -1132,56 +1131,42 @@ ImageDescriptorType :: enum #specified {
 // since the idea of descriptor heaps is to kind of have only one for your entire program, i lean towards to the second one. it is also easier for your game to use the library.
 // because a game only cares about a handle to the image, it doesnt care where/how it ends up in the heap or what its alignment must be. so i think second solution is a clear winner here.
 //          - apila, 22/10/26
+//
+//
+// change in design:
+// acceleration structures dont have descriptors anymore, the shader gets the address of the acceleration structure (AccelerationStructure.address)
+// through the shader data pointer instead. so the resource heap only has image descriptors and the sampler heap only has sampler descriptors.
+// since every heap has only one descriptor type, both heaps work with indices now rather than byte offsets.
+//       - apila, 07/11/26
+//
 
-// gets the descriptors finds a place on the heap to store all of them contagiously and returns the offset of the first descriptor.
-// the offset of the other descriptor can be calculated this formula by simply: offset + index * stride.
-// the offset is returned by this function, the index is the index in descriptors array, stride is provided by the library already.
-WriteImageDescriptors :: (descriptors: [] Image, type: ImageDescriptorType) -> offset: int {
-   offset := DescriptorHeapAlloc(*vk.resourceHeapAllocator, descriptors.count * vk.imageDescriptorStride, xx vk.descriptorHeapProperties.imageDescriptorAlignment);
-   WriteImageDescriptors(offset, descriptors, type);
-   return offset;
+// gets the descriptors, finds a place on the heap to store all of them contiguously and returns the index of the first descriptor.
+// the index of the other descriptors is simply: index + i, where i is the index in the descriptors array.
+WriteImageDescriptors :: (descriptors: [] Image, type: ImageDescriptorType) -> index: int {
+   index := DescriptorHeapAlloc(*vk.resourceHeapAllocator, descriptors.count);
+   WriteImageDescriptors(index, descriptors, type);
+   return index;
 }
 
-WriteAccelerationStructureDescriptors :: (descriptors: [] AccelerationStructure) -> offset: int {
-   offset := DescriptorHeapAlloc(*vk.resourceHeapAllocator, descriptors.count * vk.accelerationStructureDescriptorStride, xx vk.descriptorHeapProperties.bufferDescriptorAlignment);
-   WriteAccelerationStructureDescriptors(offset, descriptors);
-   return offset;
-}
-
-// returns the index of the first sampler rather than the offset (the sampler heap has only one descriptor type so indices make sense here).
-// idk maybe for consistency i should use offsets here too. idk.
+// same as WriteImageDescriptors but for the sampler heap.
 WriteSamplerDescriptors :: (descriptors: [] SamplerInfo) -> index: int {
-   offset := DescriptorHeapAlloc(*vk.samplerHeapAllocator, descriptors.count * vk.samplerDescriptorStride, xx vk.descriptorHeapProperties.samplerDescriptorAlignment);
-
-   // every allocation in the sampler heap is a multiple of the stride and the stride is a multiple of the alignment, so this always holds
-   assert(offset % vk.samplerDescriptorStride == 0);
-   index := offset / vk.samplerDescriptorStride;
-
+   index := DescriptorHeapAlloc(*vk.samplerHeapAllocator, descriptors.count);
    WriteSamplerDescriptors(index, descriptors);
    return index;
 }
 
-// frees the descriptors written by WriteImageDescriptors or WriteAccelerationStructureDescriptors.
-// offset is the value returned by those functions.
+// frees the descriptors written by WriteImageDescriptors.
+// index is the value returned by WriteImageDescriptors.
 // the user is responsible for making sure that the gpu is done with the descriptors before erasing them.
-EraseResourceDescriptors :: (offset: int) {
-   DescriptorHeapFree(*vk.resourceHeapAllocator, offset);
+EraseImageDescriptors :: (index: int) {
+   DescriptorHeapFree(*vk.resourceHeapAllocator, index);
 }
 
 // frees the descriptors written by WriteSamplerDescriptors.
 // index is the value returned by WriteSamplerDescriptors.
 // the user is responsible for making sure that the gpu is done with the descriptors before erasing them.
 EraseSamplerDescriptors :: (index: int) {
-   DescriptorHeapFree(*vk.samplerHeapAllocator, index * vk.samplerDescriptorStride);
-}
-
-// meant to be used to keep track of the next offset in the resource heap when you write descriptors to it.    - apila, 24/08/26
-GetSizeOfDescriptors :: (descriptors: [] Image) -> int {
-   return vk.imageDescriptorStride * descriptors.count;
-}
-
-GetSizeOfDescriptors :: (descriptors: [] AccelerationStructure) -> int {
-   return vk.accelerationStructureDescriptorStride * descriptors.count;
+   DescriptorHeapFree(*vk.samplerHeapAllocator, index);
 }
 
 IDENTITY_TRANSFORM_MATRIX :: VkTransformMatrixKHR.{
@@ -3453,7 +3438,6 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
 
    {
       vk.imageDescriptorStride = xx Align(vk.descriptorHeapProperties.imageDescriptorSize, vk.descriptorHeapProperties.imageDescriptorAlignment);
-      vk.accelerationStructureDescriptorStride = xx Align(vk.descriptorHeapProperties.bufferDescriptorSize, vk.descriptorHeapProperties.bufferDescriptorAlignment);
       vk.samplerDescriptorStride = xx Align(vk.descriptorHeapProperties.samplerDescriptorSize, vk.descriptorHeapProperties.samplerDescriptorAlignment);
 
       vk.resourceHeapSize = xx min(vk.descriptorHeapProperties.maxResourceHeapSize, settings.desiredResourceHeapSize + vk.descriptorHeapProperties.minResourceHeapReservedRange);
@@ -3473,8 +3457,8 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
       vk.samplerHeap.gpu, vk.samplerHeap.cpu = GpuMalloc(vk.samplerHeapSize, xx vk.descriptorHeapProperties.samplerHeapAlignment, debugName = "sampler descriptor heap", IS_DESCRIPTOR_HEAP = true);
 
       // driver reserved ranges are at the end of the heaps, the allocators must not touch them
-      InitDescriptorHeapAllocator(*vk.resourceHeapAllocator, vk.resourceHeapSize - xx vk.descriptorHeapProperties.minResourceHeapReservedRange);
-      InitDescriptorHeapAllocator(*vk.samplerHeapAllocator, vk.samplerHeapSize - xx vk.descriptorHeapProperties.minSamplerHeapReservedRange);
+      InitDescriptorHeapAllocator(*vk.resourceHeapAllocator, (vk.resourceHeapSize - xx vk.descriptorHeapProperties.minResourceHeapReservedRange) / vk.imageDescriptorStride);
+      InitDescriptorHeapAllocator(*vk.samplerHeapAllocator, (vk.samplerHeapSize - xx vk.descriptorHeapProperties.minSamplerHeapReservedRange) / vk.samplerDescriptorStride);
    }
 
    Thread.init(*vk.toBeFreedQueueLock, "toBeFreedQueueLock");
@@ -4204,7 +4188,7 @@ WriteSamplerDescriptors :: (startIndex: int, descriptors: [] SamplerInfo) {
 
 // this has the same problem. stencils cant be written if the format is depth+stencil. read the comment above CopyImageToBuffer.
 //       - apila, 01/11/26
-WriteImageDescriptors :: (startOffset: int, descriptors: [] Image, type: ImageDescriptorType) {
+WriteImageDescriptors :: (startIndex: int, descriptors: [] Image, type: ImageDescriptorType) {
    resourceDescriptorInfos := NewArray(descriptors.count, VkResourceDescriptorInfoEXT,, temp);
    hostAddressRanges := NewArray(descriptors.count, VkHostAddressRangeEXT,, temp);
    imageViewCreateInfos := NewArray(descriptors.count, VkImageViewCreateInfo,, temp);
@@ -4247,9 +4231,9 @@ WriteImageDescriptors :: (startOffset: int, descriptors: [] Image, type: ImageDe
          data.pImage = *imageDescriptorInfos[it_index],
       };
 
-      offset := startOffset + (it_index * vk.imageDescriptorStride);
+      index := startIndex + it_index;
       hostAddressRanges[it_index] = .{
-         address = vk.resourceHeap.cpu.(*u8) + offset,
+         address = vk.resourceHeap.cpu.(*u8) + (index * vk.imageDescriptorStride),
          size = vk.descriptorHeapProperties.imageDescriptorSize,
       };
    }
@@ -4258,119 +4242,79 @@ WriteImageDescriptors :: (startOffset: int, descriptors: [] Image, type: ImageDe
    assert(vkResult == VK_SUCCESS);
 }
 
-WriteAccelerationStructureDescriptors :: (startOffset: int, descriptors: [] AccelerationStructure) {
-   resourceDescriptorInfos := NewArray(descriptors.count, VkResourceDescriptorInfoEXT,, temp);
-   hostAddressRanges := NewArray(descriptors.count, VkHostAddressRangeEXT,, temp);
-   deviceAddressRanges := NewArray(descriptors.count, VkDeviceAddressRangeEXT,, temp);
-
-   for descriptors {
-      deviceAddressRanges[it_index] = .{
-         address = descriptors[it_index].address,
-         size = xx descriptors[it_index].size,
-      };
-
-      resourceDescriptorInfos[it_index] = .{
-         sType = VK_STRUCTURE_TYPE_RESOURCE_DESCRIPTOR_INFO_EXT,
-         pNext = null,
-         type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
-         data.pAddressRange = *deviceAddressRanges[it_index],
-      };
-
-      offset := startOffset + (it_index * vk.accelerationStructureDescriptorStride);
-      hostAddressRanges[it_index] = .{
-         address = vk.resourceHeap.cpu.(*u8) + offset,
-         size = vk.descriptorHeapProperties.bufferDescriptorSize,
-      };
-   }
-
-   vkResult := vkWriteResourceDescriptorsEXT(vk.device, xx resourceDescriptorInfos.count, resourceDescriptorInfos.data, hostAddressRanges.data);
-   assert(vkResult == VK_SUCCESS);
-}
-
-// free list allocator for the descriptor heaps. works with byte offsets and doesnt know anything about descriptor types.
-// different descriptor types can live in the same heap with different alignment requirements.
-// the padding created by the alignment stays in the free list so it can still be used by allocations with smaller alignment.
+// free list allocator for the descriptor heaps. works with slot indices and doesnt know anything about bytes.
+// every heap has only one descriptor type so every slot has the same size and there is no alignment to deal with.
+// still keeps ranges of free slots (rather than single slots) because the descriptors of one write must be contiguous.
 DescriptorHeapAllocator :: struct {
    Block :: struct {
-      offset:  int;
-      size:    int;
+      index:   int;
+      count:   int;
    }
 
-   freeBlocks:    [..] Block;       // sorted by offset. adjacent blocks are always merged so no two blocks touch each other
-   allocations:   Table(int, int);  // offset -> size. so the user only needs to give back the offset to free
+   freeBlocks:    [..] Block;       // sorted by index. adjacent blocks are always merged so no two blocks touch each other
+   allocations:   Table(int, int);  // index -> count. so the user only needs to give back the index to free
    mutex:         Thread.Mutex;
 }
 
-InitDescriptorHeapAllocator :: (allocator: *DescriptorHeapAllocator, size: int) {
+InitDescriptorHeapAllocator :: (allocator: *DescriptorHeapAllocator, slotCount: int) {
    Thread.init(*allocator.mutex);
-   array_add(*allocator.freeBlocks, .{ offset = 0, size = size });
+   array_add(*allocator.freeBlocks, .{ index = 0, count = slotCount });
 }
 
 // first fit
-DescriptorHeapAlloc :: (allocator: *DescriptorHeapAllocator, size: int, alignment: int) -> offset: int {
-   assert(size > 0, "cant write 0 descriptors");
+DescriptorHeapAlloc :: (allocator: *DescriptorHeapAllocator, count: int) -> index: int {
+   assert(count > 0, "cant write 0 descriptors");
 
    Thread.lock(*allocator.mutex);
    defer Thread.unlock(*allocator.mutex);
 
    for * block, blockIndex: allocator.freeBlocks {
-      start := Align(block.offset, alignment);
-      end := start + size;
-      blockEnd := block.offset + block.size;
-      if end > blockEnd continue;
+      if block.count < count continue;
 
-      // the block gets split into: [block.offset, start) free, [start, end) allocated, [end, blockEnd) free
-      hasHead := start > block.offset;
-      hasTail := end < blockEnd;
-
-      if hasHead && hasTail {
-         block.size = start - block.offset;
-         array_insert_at(*allocator.freeBlocks, .{ offset = end, size = blockEnd - end }, blockIndex + 1);
-      } else if hasHead {
-         block.size = start - block.offset;
-      } else if hasTail {
-         block.offset = end;
-         block.size = blockEnd - end;
-      } else {
+      index := block.index;
+      if block.count == count {
          array_ordered_remove_by_index(*allocator.freeBlocks, blockIndex);
+      } else {
+         block.index += count;
+         block.count -= count;
       }
 
-      table_add(*allocator.allocations, start, size);
-      return start;
+      table_add(*allocator.allocations, index, count);
+      return index;
    }
 
-   assert(false, "descriptor heap is full (requested % bytes). increase the desired heap size in InitializationSettings", size);
+   assert(false, "descriptor heap is full (requested % descriptors). increase the desired heap size in InitializationSettings", count);
    return -1;
 }
 
-DescriptorHeapFree :: (allocator: *DescriptorHeapAllocator, offset: int) {
+DescriptorHeapFree :: (allocator: *DescriptorHeapAllocator, index: int) {
    Thread.lock(*allocator.mutex);
    defer Thread.unlock(*allocator.mutex);
 
-   found, size := table_remove(*allocator.allocations, offset);
-   assert(found, "no descriptors at offset %. double erase or invalid offset", offset);
+   found, count := table_remove(*allocator.allocations, index);
+   assert(found, "no descriptors at index %. double erase or invalid index", index);
 
-   end := offset + size;
+   end := index + count;
    blocks := *allocator.freeBlocks;
 
    // where the freed range would be inserted to keep the list sorted (index of the first block after the freed range).
    // can be blocks.count if the freed range is after every free block. the previous block (if exists) is always at insertIndex - 1
    insertIndex := 0;
-   while insertIndex < blocks.count && blocks.data[insertIndex].offset < offset  insertIndex += 1;
+   while insertIndex < blocks.count && blocks.data[insertIndex].index < index  insertIndex += 1;
 
-   mergePrev := insertIndex > 0 && blocks.data[insertIndex - 1].offset + blocks.data[insertIndex - 1].size == offset;
-   mergeNext := insertIndex < blocks.count && blocks.data[insertIndex].offset == end;
+   mergePrev := insertIndex > 0 && blocks.data[insertIndex - 1].index + blocks.data[insertIndex - 1].count == index;
+   mergeNext := insertIndex < blocks.count && blocks.data[insertIndex].index == end;
 
    if mergePrev && mergeNext {
-      blocks.data[insertIndex - 1].size += size + blocks.data[insertIndex].size;
+      blocks.data[insertIndex - 1].count += count + blocks.data[insertIndex].count;
       array_ordered_remove_by_index(blocks, insertIndex);
    } else if mergePrev {
-      blocks.data[insertIndex - 1].size += size;
+      blocks.data[insertIndex - 1].count += count;
    } else if mergeNext {
-      blocks.data[insertIndex].offset = offset;
-      blocks.data[insertIndex].size += size;
+      blocks.data[insertIndex].index = index;
+      blocks.data[insertIndex].count += count;
    } else {
-      array_insert_at(blocks, .{ offset = offset, size = size }, insertIndex);
+      array_insert_at(blocks, .{ index = index, count = count }, insertIndex);
    }
 }
 
