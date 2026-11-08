@@ -127,7 +127,7 @@ Shader :: struct {
    maxPrimitives:   u32;                                        // mesh
    topology:        ApilaSpirv.PrimitiveTopology = .Triangles;  // mesh
    name:            string;  // for the file names of spirvOutputFolder: the name the call gives (SHADERS.MyShader is MyShader), "literal" for a procedure literal
-   spirvIndex:      int;
+   spirvIndex:      int;     // -1 if it is not compiled, see Bake
 }
 
 Error :: (node: *Code_Node, format: string, arguments: .. Any) {
@@ -485,15 +485,10 @@ Bake :: (w: Workspace) {
    options, intermediatePath := GetBuildOptions(w);
 
    spirvs: [..] [] u8;
-   compiled: Table(string, int); // ShaderKey -> index in spirvs. the same shader of more than one call is compiled once
+   compiled: Table(string, int); // ShaderKey -> index in spirvs (-1 if it is not compiled). the same shader of more than one call is compiled once
 
    for * call: calls {
       for * shader: call.shaders {
-         if (shader.header.body_or_null == null) {
-            Error(call.call, "the body of the % shader % is not typechecked", shader.stage, shader.header.name);
-            continue;
-         }
-
          key := ShaderKey(shader);
          found, index := table_find(*compiled, key);
          if (found) {
@@ -501,7 +496,16 @@ Bake :: (w: Workspace) {
             continue;
          }
 
-         spirv := ApilaSpirv.CompileEntryPoint(shader.header, shader.stage, shader.workgroupSize, shader.maxVertices, shader.maxPrimitives, shader.topology);
+         spirv, untypechecked := ApilaSpirv.CompileEntryPoint(shader.header, shader.stage, shader.workgroupSize, shader.maxVertices, shader.maxPrimitives, shader.topology);
+
+         // the shader or a procedure it calls has an error jai hasnt reported yet (an undefined name...). it is not compiled, the rest is baked
+         // so the program doesnt wait for __GetBakedSpirv anymore, and the compilation fails with the error of jai, which says what is wrong.
+         if (untypechecked != null) {
+            shader.spirvIndex = -1;
+            table_add(*compiled, key, -1);
+            continue;
+         }
+
          spirv = PostProcess(spirv, options, intermediatePath, call, shader, w);
 
          shader.spirvIndex = spirvs.count;
@@ -567,6 +571,7 @@ GenerateBakedSpirv :: (spirvs: [] [] u8) -> string {
    append(*builder, "__GetBakedSpirv :: (file: string, line: s32, column: s32, stage: s32) -> [] u8 {\n");
    for call: calls {
       for call.shaders {
+         if (it.spirvIndex < 0) continue;
          print_to_builder(*builder, "   if line == % && column == % && stage == % && file == \"%\"  return .{ __bakedSpirv%.count * 4, cast(*u8) __bakedSpirv%.data };\n",
             call.location.line_number, call.location.character_number, cast(s32) it.stage, EscapeString(call.location.fully_pathed_filename), it.spirvIndex, it.spirvIndex);
       }
