@@ -270,7 +270,6 @@ Window :: struct {
    width:                     int;
    height:                    int;
    title:                     string;
-   position:                  Int2;
    polledEventsQueue:         Queue(PolledEvent);
    input:                     Input;
    isFramebufferResized:      bool;
@@ -3762,19 +3761,6 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
    result.height = height;
    result.title = title;
 
-   {
-      positionX: s32;
-      positionY: s32;
-      glfwGetWindowPos(result.window, *positionX, *positionY);
-      result.position.x = positionX;
-      result.position.y = positionY;
-
-      // on x11 the window is not placed yet, so glfwGetWindowPos gives (0, 0). when the window manager places it WindowPosCallback updates result.position,
-      // but when the position was given glfw already thinks the window is there and doesnt call WindowPosCallback
-      if x != WINDOW_POSITION_ANY  result.position.x = x;
-      if y != WINDOW_POSITION_ANY  result.position.y = y;
-   }
-
    if (glfwRawMouseMotionSupported() != 0) {
       glfwSetInputMode(result.window, GLFW_RAW_MOUSE_MOTION, 1);
    }
@@ -3788,16 +3774,6 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
       }
    };
    glfwSetWindowSizeCallback(result.window, WindowSizeCallback);
-
-   WindowPosCallback: GLFWwindowposfun : (glfwWindow: *GLFWwindow, x: s32, y: s32) #c_call {
-      push_context {
-         found, window := table_find(*glfwWindowToWindow, glfwWindow);
-         assert(found);
-         window.position.x = x;
-         window.position.y = y;
-      }
-   };
-   glfwSetWindowPosCallback(result.window, WindowPosCallback);
 
    KeyCallback: GLFWkeyfun : (glfwWindow: *GLFWwindow, key: s32, scancode: s32, action: s32, mods: s32) #c_call {
       // if (action == GLFW_PRESS) {
@@ -3986,9 +3962,10 @@ UpdateInput :: (window: *Window) {
 }
 
 // position of the top left corner of the content area (not of the decorations) in screen coordinates.
-// updated in UpdateInput, so after SetWindowPosition it is the new position from the next UpdateInput on
 GetWindowPosition :: (window: *Window) -> Int2 {
-   return window.position;
+   x, y: s32;
+   glfwGetWindowPos(window.window, *x, *y);
+   return .{x, y};
 }
 
 SetWindowPosition :: (window: *Window, x: int, y: int) {
