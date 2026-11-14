@@ -3001,9 +3001,16 @@ InitializationSettings :: struct {
    enableValidationLayers:    bool     = true;
    windowWidth:               int      = 640;
    windowHeight:              int      = 480;
+   windowX:                   int      = WINDOW_POSITION_ANY; // position of the top left corner of the content area (not of the decorations) in screen coordinates. WINDOW_POSITION_ANY lets the window manager choose
+   windowY:                   int      = WINDOW_POSITION_ANY;
+   isWindowMaximized:         bool     = false; // windowWidth and windowHeight are still the size the window gets when it is restored
    windowTitle:               string   = "kayu";
    isWindowVisible:           bool     = true;
 }
+
+// the window manager chooses the position. windowX and windowY of InitializationSettings, parameters of CreateWindow
+#assert(GLFW_ANY_POSITION == S32_MIN);
+WINDOW_POSITION_ANY :: S32_MIN;  // if i just say WINDOW_POSITION_ANY :: GLFW_ANY_POSITION, then it doesnt work, kayu.
 
 // time since initialization
 GetTime :: () -> float64 {
@@ -3156,7 +3163,7 @@ InitializeVulkanAndWindow :: (settings: InitializationSettings) -> *Window {
    queueFamilyProperties.data = temporary_alloc(queueFamilyCount * size_of(VkQueueFamilyProperties)); // jai doesnt allow to allocate on the stack
    vkGetPhysicalDeviceQueueFamilyProperties(vk.physicalDevice, *queueFamilyCount, queueFamilyProperties.data);
 
-   window := CreateWindowThePartBeforeDeviceCreation(settings.windowWidth, settings.windowHeight, settings.windowTitle);
+   window := CreateWindowThePartBeforeDeviceCreation(settings.windowWidth, settings.windowHeight, settings.windowTitle, settings.windowX, settings.windowY, settings.isWindowMaximized);
 
    for 0..queueFamilyCount - 1 {
       graphicsSupport := false;
@@ -3593,8 +3600,8 @@ DestroySwapchain :: (window: *Window) {
    free(window.queueSubmitFences.data);
 }
 
-CreateWindow :: (width: int, height: int, title: string) -> *Window {
-   window := CreateWindowThePartBeforeDeviceCreation(width, height, title);
+CreateWindow :: (width: int, height: int, title: string, x: int = WINDOW_POSITION_ANY, y: int = WINDOW_POSITION_ANY, maximized := false) -> *Window {
+   window := CreateWindowThePartBeforeDeviceCreation(width, height, title, x, y, maximized);
    window.presentMode = ChooseSwapPresentMode(vk.availablePresentModes);
    CreateSwapchain(window);
    return window;
@@ -3735,8 +3742,14 @@ CreateSwapchain :: (window: *Window) {
 }
 
 // creates glfw window and vulkan surface attached to it
-CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: string) -> *Window {
+CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: string, x: int = WINDOW_POSITION_ANY, y: int = WINDOW_POSITION_ANY, maximized := false) -> *Window {
    result := New(Window); // free when destroying window
+
+   // window hints stay set for the windows created after this one, so they are set every time
+   glfwWindowHint(GLFW_POSITION_X, xx x);
+   glfwWindowHint(GLFW_POSITION_Y, xx y);
+   glfwWindowHint(GLFW_MAXIMIZED, xx ifx maximized then GLFW_TRUE else GLFW_FALSE);
+
    result.window = glfwCreateWindow(xx width, xx height, to_c_string(title,, temp), null, null);
 
    if (result.window == null) {
@@ -3754,6 +3767,11 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
       glfwGetWindowPos(result.window, *positionX, *positionY);
       result.position.x = positionX;
       result.position.y = positionY;
+
+      // on x11 the window is not placed yet, so glfwGetWindowPos gives (0, 0). when the window manager places it WindowPosCallback updates result.position,
+      // but when the position was given glfw already thinks the window is there and doesnt call WindowPosCallback
+      if x != WINDOW_POSITION_ANY  result.position.x = x;
+      if y != WINDOW_POSITION_ANY  result.position.y = y;
    }
 
    if (glfwRawMouseMotionSupported() != 0) {
@@ -3769,6 +3787,16 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
       }
    };
    glfwSetWindowSizeCallback(result.window, WindowSizeCallback);
+
+   WindowPosCallback: GLFWwindowposfun : (glfwWindow: *GLFWwindow, x: s32, y: s32) #c_call {
+      push_context {
+         found, window := table_find(*glfwWindowToWindow, glfwWindow);
+         assert(found);
+         window.position.x = x;
+         window.position.y = y;
+      }
+   };
+   glfwSetWindowPosCallback(result.window, WindowPosCallback);
 
    KeyCallback: GLFWkeyfun : (glfwWindow: *GLFWwindow, key: s32, scancode: s32, action: s32, mods: s32) #c_call {
       // if (action == GLFW_PRESS) {
@@ -3954,6 +3982,28 @@ UpdateInput :: (window: *Window) {
          case; assert(false, "switch case should be exhaustive. polledEvent.type: %", polledEvent.type);
       }
    }
+}
+
+// position of the top left corner of the content area (not of the decorations) in screen coordinates.
+// updated in UpdateInput, so after SetWindowPosition it is the new position from the next UpdateInput on
+GetWindowPosition :: (window: *Window) -> Int2 {
+   return window.position;
+}
+
+SetWindowPosition :: (window: *Window, x: int, y: int) {
+   glfwSetWindowPos(window.window, xx x, xx y);
+}
+
+IsWindowMaximized :: (window: *Window) -> bool {
+   return glfwGetWindowAttrib(window.window, GLFW_MAXIMIZED) != 0;
+}
+
+MaximizeWindow :: (window: *Window) {
+   glfwMaximizeWindow(window.window);
+}
+
+RestoreWindow :: (window: *Window) {
+   glfwRestoreWindow(window.window);
 }
 
 SetClipboardText :: (text: string) {
