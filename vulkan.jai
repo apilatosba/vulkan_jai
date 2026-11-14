@@ -3009,8 +3009,9 @@ InitializationSettings :: struct {
 }
 
 // the window manager chooses the position. windowX and windowY of InitializationSettings, parameters of CreateWindow
-#assert(GLFW_ANY_POSITION == S32_MIN);
-WINDOW_POSITION_ANY :: S32_MIN;  // if i just say WINDOW_POSITION_ANY :: GLFW_ANY_POSITION, then it doesnt work, kayu.
+WINDOW_POSITION_ANY: s32 : GLFW_ANY_POSITION;   // providing the s32 type is necessary here.
+                                                // it is because 0x8000_0000 is S32_MAX + 1 so cast fails without no_check. so i did it like this instead of putting no_check to the cast.
+                                                //       - apila, 14/11/26
 
 // time since initialization
 GetTime :: () -> float64 {
