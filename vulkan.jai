@@ -3976,6 +3976,10 @@ IsWindowMaximized :: (window: *Window) -> bool {
    return glfwGetWindowAttrib(window.window, GLFW_MAXIMIZED) != 0;
 }
 
+IsWindowMinimized :: (window: *Window) -> bool {
+   return glfwGetWindowAttrib(window.window, GLFW_ICONIFIED) != 0;
+}
+
 MaximizeWindow :: (window: *Window) {
    glfwMaximizeWindow(window.window);
 }
