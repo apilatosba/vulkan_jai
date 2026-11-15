@@ -3980,6 +3980,10 @@ IsWindowMinimized :: (window: *Window) -> bool {
    return glfwGetWindowAttrib(window.window, GLFW_ICONIFIED) != 0;
 }
 
+IsWindowFocused :: (window: *Window) -> bool {
+   return window.isFocused;
+}
+
 MaximizeWindow :: (window: *Window) {
    glfwMaximizeWindow(window.window);
 }
