@@ -48,15 +48,15 @@ ImageDescription :: struct {
 // this struct is a lil big in size
 // almost 1KB
 Input :: struct {
-   keyboard:   KeyboardState;
-   mouse:      MouseState;
+   keyboard:            KeyboardState;
+   mouse:               MouseState;
+   polledEventsQueue:   Queue(PolledEvent);
 }
 
 KeyboardState :: struct {
    keysDown:         [MAX_KEY_COUNT] bool;
    pressedKeys:      [MAX_KEY_COUNT] u8;
    releasedKeys:     [MAX_KEY_COUNT] u8;
-   characterQueue:   Queue(u32);
 
    MAX_KEY_COUNT :: 512;
 }
@@ -235,6 +235,7 @@ PolledEventType :: enum {
    MouseButton;
    CursorPosition;
    Scroll;
+   Character;
 }
 
 // tagged union
@@ -257,6 +258,8 @@ PolledEvent :: struct {
          yOffset: float;
          xOffset: float;
       }
+
+      character: u32;
    }
 }
 
@@ -270,7 +273,6 @@ Window :: struct {
    width:                     int;
    height:                    int;
    title:                     string;
-   polledEventsQueue:         Queue(PolledEvent);
    input:                     Input;
    isFramebufferResized:      bool;
    isFocused:                 bool;
@@ -3806,7 +3808,7 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
             key = key
          };
 
-         Enqueue(*window.polledEventsQueue, polledEvent);
+         Enqueue(*window.input.polledEventsQueue, polledEvent);
       }
    };
    glfwSetKeyCallback(result.window, KeyCallback);
@@ -3816,7 +3818,11 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
          found, window := table_find(*glfwWindowToWindow, glfwWindow);
          assert(found);
 
-         Enqueue(*window.input.keyboard.characterQueue, c);
+         polledEvent: PolledEvent;
+         polledEvent.type = .Character;
+         polledEvent.character = c;
+
+         Enqueue(*window.input.polledEventsQueue, polledEvent);
       }
    };
    glfwSetCharCallback(result.window, CharCallback);
@@ -3839,7 +3845,7 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
             button = button
          };
 
-         Enqueue(*window.polledEventsQueue, polledEvent);
+         Enqueue(*window.input.polledEventsQueue, polledEvent);
       }
    };
    glfwSetMouseButtonCallback(result.window, MouseButtonCallback);
@@ -3855,7 +3861,7 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
          polledEvent.type = .CursorPosition;
          polledEvent.cursorPosition = .{ xx xpos, xx (window.height - ypos) };
 
-         Enqueue(*window.polledEventsQueue, polledEvent);
+         Enqueue(*window.input.polledEventsQueue, polledEvent);
       }
    };
    glfwSetCursorPosCallback(result.window, CursorPosCallback);
@@ -3874,7 +3880,7 @@ CreateWindowThePartBeforeDeviceCreation :: (width: int, height: int, title: stri
             xOffset = xx xoffset
          };
 
-         Enqueue(*window.polledEventsQueue, polledEvent);
+         Enqueue(*window.input.polledEventsQueue, polledEvent);
       }
    };
    glfwSetScrollCallback(result.window, ScrollCallback);
@@ -3913,7 +3919,7 @@ UpdateInput :: (window: *Window) {
    window.input.mouse.positionLastFrame = window.input.mouse.position;
    window.input.mouse.wheel = 0;
    window.input.mouse.horizontalWheel = 0;
-   Clear(*window.input.keyboard.characterQueue);
+   Clear(*window.input.polledEventsQueue);
    memset(*window.input.keyboard.pressedKeys, 0, window.input.keyboard.pressedKeys.count * size_of(type_of(window.input.keyboard.pressedKeys[0])));
    memset(*window.input.keyboard.releasedKeys, 0, window.input.keyboard.releasedKeys.count * size_of(type_of(window.input.keyboard.releasedKeys[0])));
    memset(*window.input.mouse.buttonsPressed, 0, window.input.mouse.buttonsPressed.count * size_of(type_of(window.input.mouse.buttonsPressed[0])));
@@ -3921,10 +3927,7 @@ UpdateInput :: (window: *Window) {
 
    glfwPollEvents();
 
-   while (true) {
-      success, polledEvent:= Dequeue(*window.polledEventsQueue);
-      if (!success) break;
-
+   for polledEvent: window.input.polledEventsQueue {
       if #complete polledEvent.type == {
          case .Key; {
             if (polledEvent.key.action == GLFW_PRESS) {
@@ -3953,6 +3956,14 @@ UpdateInput :: (window: *Window) {
          case .Scroll; {
             window.input.mouse.wheel += polledEvent.scroll.yOffset;
             window.input.mouse.horizontalWheel += polledEvent.scroll.xOffset;
+         }
+
+         case .Character; {
+            // characters are read by iterating over the polledEventsQueue directly. why? because you want this data for text inputs
+            // and the order matters, so you can iterate over the queue and then correctly update the text. char callback doesnt report backspaces or enter keys.
+            // if you happen to type multiple characters and enter at the same time, it is unclear when the enter was pressed. but if you iterate over polledEventsQueue,
+            // you know the order.
+            //       - apila, 15/11/26
          }
 
          case .None; assert(false, "polled event type was none.");
@@ -4003,8 +4014,8 @@ GetClipboardText :: () -> string {
    return to_string(cString);
 }
 
-GetCharacterQueue :: (window: *Window) -> *Queue(u32) {
-   return *window.input.keyboard.characterQueue;
+GetInputEvents :: (window: *Window) -> *Queue(PolledEvent) {
+   return *window.input.polledEventsQueue;
 }
 
 IsKeyDown :: (window: *Window, key: KeyboardKey) -> bool {
