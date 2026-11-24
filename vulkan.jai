@@ -33,7 +33,12 @@ Image :: struct {
                                  // view is only needed for attachments, i think. it is not needed in the descriptor heap
                                  //       - apila, 24/03/26
    description:   ImageDescription;
+   memory:        u64;
    debugName:     string;
+
+   #overlay(description.width)   width:   type_of(description.width);
+   #overlay(description.height)  height:  type_of(description.height);
+   #overlay(description.depth)   depth:   type_of(description.depth);
 }
 
 ImageDescription :: struct {
@@ -43,6 +48,10 @@ ImageDescription :: struct {
    mipLevels:     u32;
    sampleCount:   u32;
    usage:         VkImageUsageFlags;
+
+   #overlay(size[0]) width:   type_of(size[0]);
+   #overlay(size[1]) height:  type_of(size[1]);
+   #overlay(size[2]) depth:   type_of(size[2]);
 }
 
 // this struct is a lil big in size
@@ -1034,6 +1043,7 @@ CreateImage :: (gpuPointer: u64, description: ImageDescription, debugName := "")
       image = outImage,
       description = description,
       view = imageView,
+      memory = gpuPointer,
       debugName = debugName
    };
 }
